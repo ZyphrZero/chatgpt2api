@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -37,25 +39,32 @@ const (
 	authSessionCookieName      = "chatgpt2api_session"
 )
 
+var defaultShareImageMetaPattern = regexp.MustCompile(`(?is)\s*(<meta\s+(?:property|name)=["'](?:og:image|twitter:image)["']\s+content=["']/share-card\.png["']\s*/?>|<link\s+rel=["']image_src["']\s+href=["']/share-card\.png["']\s*/?>)`)
+
 type App struct {
-	config     *config.Store
-	auth       *service.AuthService
-	accounts   *service.AccountService
-	logs       *service.LogService
-	logger     *service.Logger
-	proxy      *service.ProxyService
-	engine     *protocol.Engine
-	images     *service.ImageService
-	tasks      *service.ImageTaskService
-	announce   *service.AnnouncementService
-	prompts    *service.PromptFavoriteService
-	cpa        *service.CPAConfig
-	cpaImport  *service.CPAImportService
-	sub2       *service.Sub2APIConfig
-	sub2Import *service.Sub2APIService
-	register   *service.RegisterService
-	update     *service.UpdateService
-	cancel     context.CancelFunc
+	config        *config.Store
+	auth          *service.AuthService
+	accounts      *service.AccountService
+	logs          *service.LogService
+	logger        *service.Logger
+	proxy         *service.ProxyService
+	engine        *protocol.Engine
+	images        *service.ImageService
+	profiles      *service.UserProfileService
+	notifications *service.NotificationService
+	callStats     *service.ImageCallStatsService
+	shares        *service.ImageShareService
+	tasks         *service.ImageTaskService
+	announce      *service.AnnouncementService
+	prompts       *service.PromptFavoriteService
+	cpa           *service.CPAConfig
+	cpaImport     *service.CPAImportService
+	sub2          *service.Sub2APIConfig
+	sub2Import    *service.Sub2APIService
+	register      *service.RegisterService
+	update        *service.UpdateService
+	authLimiter   *authIPLimiter
+	cancel        context.CancelFunc
 }
 
 func NewApp() (*App, error) {
@@ -88,7 +97,7 @@ func NewApp() (*App, error) {
 	}
 	documentStore, _ := storageBackend.(storage.JSONDocumentBackend)
 	engine := &protocol.Engine{Accounts: accounts, Config: cfg, Storage: documentStore, Proxy: proxy, Logger: logger}
-	app := &App{config: cfg, auth: auth, accounts: accounts, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), announce: service.NewAnnouncementService(cfg.DataDir, storageBackend), prompts: service.NewPromptFavoriteService(cfg.DataDir, storageBackend), cpa: service.NewCPAConfig(cfg.DataDir, storageBackend), sub2: service.NewSub2APIConfig(cfg.DataDir, storageBackend), update: newUpdateService(cfg), cancel: cancel}
+	app := &App{config: cfg, auth: auth, accounts: accounts, logs: logs, logger: logger, proxy: proxy, engine: engine, images: service.NewImageService(cfg, storageBackend), profiles: service.NewUserProfileService(cfg.DataDir, storageBackend), notifications: service.NewNotificationService(cfg.DataDir, storageBackend), callStats: service.NewImageCallStatsService(cfg.DataDir, storageBackend), shares: service.NewImageShareService(cfg.DataDir, storageBackend), announce: service.NewAnnouncementService(cfg.DataDir, storageBackend), prompts: service.NewPromptFavoriteService(cfg.DataDir, storageBackend), cpa: service.NewCPAConfig(cfg.DataDir, storageBackend), sub2: service.NewSub2APIConfig(cfg.DataDir, storageBackend), update: newUpdateService(cfg), authLimiter: newAuthIPLimiter(), cancel: cancel}
 	app.cpaImport = service.NewCPAImportService(app.cpa, accounts, proxy)
 	app.sub2Import = service.NewSub2APIService(app.sub2, accounts)
 	app.register = service.NewRegisterService(cfg.DataDir, accounts, storageBackend)
@@ -156,7 +165,7 @@ func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := a.engine.ListModels(r.Context())
-	a.writeProtocol(w, r, result, nil, err, "openai", "/v1/models", "models", identity, "模型列表", service.ImageVisibilityPrivate)
+	a.writeProtocol(w, r, result, nil, err, "openai", "/v1/models", "models", identity, "模型列表", service.ImageVisibilityPrivate, 0, false)
 }
 
 func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
@@ -172,6 +181,21 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 	body["owner_id"] = identityScope(identity)
 	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
+
+	// 动态额度消耗逻辑：检测 prompt 或 size 中的 4k/2k 关键词
+	multiplier := 1
+	promptAndSize := strings.ToLower(util.Clean(body["prompt"]) + " " + util.Clean(body["size"]))
+	if strings.Contains(promptAndSize, "8k") {
+		multiplier = 4
+	} else if strings.Contains(promptAndSize, "4k") {
+		multiplier = 4
+	} else if strings.Contains(promptAndSize, "2k") {
+		multiplier = 2
+	}
+
+	requested := maxInt(1, util.ToInt(body["n"], 1)) * multiplier
+	body["n"] = maxInt(1, util.ToInt(body["n"], 1)) // 上游请求的图片数量保持原样
+
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, err.Error())
@@ -179,7 +203,7 @@ func (a *App) handleImageGenerations(w http.ResponseWriter, r *http.Request) {
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
 	result, stream, err := a.engine.HandleImageGenerations(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/generations", model, identity, "文生图", visibility, requested, false)
 }
 
 func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
@@ -203,6 +227,26 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	body["owner_id"] = identityScope(identity)
 	body["owner_name"] = identityDisplayName(identity)
 	body["base_url"] = a.resolveImageBaseURL(r)
+	requested := maxInt(1, util.ToInt(body["n"], 1))
+	quotaCount, fixedCharge := a.imageQuotaChargeForPayload(body, requested)
+	if preset := service.NormalizeImageResolutionPreset(util.Clean(body["image_resolution"])); preset != "" {
+		body["image_resolution"] = preset
+		switch preset {
+		case "2k":
+			if util.Clean(body["size"]) == "" {
+				body["size"] = "2048x2048"
+			}
+		case "4k":
+			if util.Clean(body["size"]) == "" {
+				body["size"] = "2880x2880"
+			}
+		case "1080p":
+			if util.Clean(body["size"]) == "" {
+				body["size"] = "1080x1080"
+			}
+		}
+	}
+	body["n"] = requested
 	visibility, err := service.NormalizeImageVisibility(util.Clean(body["visibility"]))
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, err.Error())
@@ -210,7 +254,7 @@ func (a *App) handleImageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
 	result, stream, err := a.engine.HandleImageEdits(r.Context(), body, images)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/images/edits", model, identity, "图生图", visibility, quotaCount, fixedCharge)
 }
 
 func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -227,7 +271,7 @@ func (a *App) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	body["owner_name"] = identityDisplayName(identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleChatCompletions(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/chat/completions", model, identity, "文本生成", service.ImageVisibilityPrivate, 0, false)
 }
 
 func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
@@ -244,7 +288,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	body["owner_name"] = identityDisplayName(identity)
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleResponsesScoped(r.Context(), body, identityScope(identity))
-	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate)
+	a.writeProtocol(w, r, result, stream, err, "openai", "/v1/responses", model, identity, "Responses", service.ImageVisibilityPrivate, 0, false)
 }
 
 func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
@@ -263,18 +307,36 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	model := firstNonEmpty(util.Clean(body["model"]), "auto")
 	result, stream, err := a.engine.HandleMessages(r.Context(), body)
-	a.writeProtocol(w, r, result, stream, err, "anthropic", "/v1/messages", model, identity, "Messages", service.ImageVisibilityPrivate)
+	a.writeProtocol(w, r, result, stream, err, "anthropic", "/v1/messages", model, identity, "Messages", service.ImageVisibilityPrivate, 0, false)
 }
 
-func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model string, identity service.Identity, summary, visibility string) {
+func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[string]any, stream *protocol.StreamResult, err error, sseKind, endpoint, model string, identity service.Identity, summary, visibility string, quotaCount int, fixedCharge bool) {
 	start := time.Now()
+	refund := func(int) {}
+	if quotaCount > 0 && a.profiles != nil {
+		if reserved, reserveErr := a.profiles.ReserveQuota(identity, quotaCount); reserveErr == nil && reserved != nil {
+			refund = reserved
+		} else if reserveErr != nil {
+			a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", http.StatusTooManyRequests, reserveErr.Error(), nil)
+			util.WriteError(w, http.StatusTooManyRequests, reserveErr.Error())
+			return
+		}
+	}
 	if err != nil {
+		if quotaCount > 0 {
+			refund(quotaCount)
+		}
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), nil)
 		a.writeProtocolError(w, err)
 		return
 	}
 	if stream == nil {
 		urls := collectURLs(result)
+		if quotaCount > 0 && !fixedCharge {
+			if used := len(util.AsMapSlice(result["data"])); used < quotaCount {
+				refund(quotaCount - used)
+			}
+		}
 		a.recordGeneratedImages(identity, urls, visibility)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls)
 		util.WriteJSON(w, http.StatusOK, result)
@@ -282,6 +344,7 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
 	if stream.Kind == "anthropic" || sseKind == "anthropic" {
 		var urls []string
@@ -318,10 +381,20 @@ func (a *App) writeProtocol(w http.ResponseWriter, r *http.Request, result map[s
 		}
 	}
 	if err := <-stream.Err; err != nil {
+		if quotaCount > 0 && !fixedCharge {
+			if remaining := quotaCount - len(urls); remaining > 0 {
+				refund(remaining)
+			}
+		}
 		a.recordGeneratedImages(identity, urls, visibility)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls)
 		fmt.Fprintf(w, "data: %s\n\n", jsonString(openAIErrorForStream(err)))
 	} else {
+		if quotaCount > 0 && !fixedCharge {
+			if remaining := quotaCount - len(urls); remaining > 0 {
+				refund(remaining)
+			}
+		}
 		a.recordGeneratedImages(identity, urls, visibility)
 		a.logCall(identity, summary, r.Method, endpoint, model, start, "success", http.StatusOK, "", urls)
 	}
@@ -364,14 +437,48 @@ func (a *App) writeProtocolError(w http.ResponseWriter, err error) {
 }
 
 func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAuthIPAllowed(w, r, "login") {
+		return
+	}
 	body, err := readJSONMap(r)
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
+	if !a.requireTurnstile(w, r, body) {
+		return
+	}
 	identity, token, err := a.auth.LoginPassword(util.Clean(body["username"]), util.Clean(body["password"]))
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	setAuthSessionCookie(w, r, token)
+	a.writeLoginResponse(w, *identity, token)
+}
+
+func (a *App) handleAdminKeyLogin(w http.ResponseWriter, r *http.Request) {
+	if !a.requireAuthIPAllowed(w, r, "login") {
+		return
+	}
+	body, err := readJSONMap(r)
+	if err != nil {
+		util.WriteError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	key := util.Clean(body["key"])
+	if key == "" {
+		util.WriteError(w, http.StatusBadRequest, "admin key is required")
+		return
+	}
+	if identity := a.auth.Authenticate(key); identity != nil && identity.Role == service.AuthRoleAdmin {
+		setAuthSessionCookie(w, r, key)
+		a.writeLoginResponse(w, *identity, key)
+		return
+	}
+	identity, token, err := a.auth.LoginPassword(a.config.AdminUsername(), key)
+	if err != nil || identity == nil || identity.Role != service.AuthRoleAdmin {
+		util.WriteError(w, http.StatusForbidden, "管理员密钥无效")
 		return
 	}
 	setAuthSessionCookie(w, r, token)
@@ -394,9 +501,15 @@ func (a *App) handleAccountRegister(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusForbidden, "registration is disabled")
 		return
 	}
+	if !a.requireAuthIPAllowed(w, r, "register") {
+		return
+	}
 	body, err := readJSONMap(r)
 	if err != nil {
 		util.WriteError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	if !a.requireTurnstile(w, r, body) {
 		return
 	}
 	identity, token, err := a.auth.RegisterPasswordUser(util.Clean(body["username"]), util.Clean(body["password"]), util.Clean(body["name"]))
@@ -404,8 +517,158 @@ func (a *App) handleAccountRegister(w http.ResponseWriter, r *http.Request) {
 		util.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if a.profiles != nil {
+		outcome, err := a.profiles.RegisterUserOutcome(identity.OwnerID, util.Clean(body["invite_code"]), a.config.UserFreeQuota(), a.config.InviteRewardQuota(), a.config.InviteeBonusQuota())
+		if err != nil {
+			_ = a.auth.DeleteUser(identity.OwnerID)
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		a.emitRegistrationNotifications(identity.OwnerID, outcome)
+	}
 	setAuthSessionCookie(w, r, token)
 	a.writeLoginResponse(w, *identity, token)
+}
+
+func (a *App) handleInviteLanding(w http.ResponseWriter, r *http.Request) {
+	code := strings.TrimSpace(r.URL.Query().Get("code"))
+	if code == "" {
+		code = strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/auth/invite/"), "/auth/invite"), "/")
+	}
+	if a.profiles == nil {
+		http.NotFound(w, r)
+		return
+	}
+	result := a.profiles.PublicInvite(code, a.resolveImageBaseURL(r), a.config.InviteeBonusQuota())
+	if result == nil {
+		http.NotFound(w, r)
+		return
+	}
+	util.WriteJSON(w, http.StatusOK, result)
+}
+
+func (a *App) handleImageShares(w http.ResponseWriter, r *http.Request) {
+	if a.shares == nil {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		identity, ok := a.requireIdentity(w, r, "")
+		if !ok {
+			return
+		}
+		body, err := readJSONMap(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		item, err := a.shares.Create(identity, body, a.resolveImageBaseURL(r), a.config.ImagesDir())
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if a.profiles != nil {
+			ownerID := identityScope(identity)
+			if code := a.profiles.InviteCodeOf(ownerID); code != "" {
+				item["inviter_invite_code"] = code
+				if shareURL, ok := item["share_url"].(string); ok && shareURL != "" {
+					item["share_url"] = appendQueryParam(shareURL, "ref", code)
+				}
+			}
+		}
+		util.WriteJSON(w, http.StatusOK, item)
+	case http.MethodGet:
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		if id == "" {
+			id = strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/api/image-shares/"), "/api/image-shares")
+			id = strings.Trim(id, "/")
+		}
+		if id == "" {
+			util.WriteError(w, http.StatusBadRequest, "id is required")
+			return
+		}
+		item := a.shares.Get(id)
+		if item == nil {
+			util.WriteError(w, http.StatusNotFound, "share image not found")
+			return
+		}
+		ownerID := a.shares.OwnerIDOf(id)
+		inviterCode := ""
+		if a.profiles != nil {
+			inviterCode = a.profiles.InviteCodeOf(ownerID)
+		}
+		if inviterCode != "" {
+			item["inviter_invite_code"] = inviterCode
+			if shareURL, ok := item["share_url"].(string); ok && shareURL != "" {
+				item["share_url"] = appendQueryParam(shareURL, "ref", inviterCode)
+			}
+		}
+		util.WriteJSON(w, http.StatusOK, item)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+// appendQueryParam adds key=value to the URL while preserving any existing query string.
+// If key already exists it overwrites the previous value to avoid duplicate ref params.
+func appendQueryParam(rawURL, key, value string) string {
+	if rawURL == "" || key == "" || value == "" {
+		return rawURL
+	}
+	if idx := strings.Index(rawURL, "#"); idx >= 0 {
+		base := rawURL[:idx]
+		fragment := rawURL[idx:]
+		return appendQueryParam(base, key, value) + fragment
+	}
+	separator := "?"
+	if strings.Contains(rawURL, "?") {
+		separator = "&"
+	}
+	return rawURL + separator + key + "=" + value
+}
+
+func (a *App) handleImageCallStats(w http.ResponseWriter, r *http.Request) {
+	if _, ok := a.requireIdentity(w, r, ""); !ok {
+		return
+	}
+	if a.callStats == nil {
+		util.WriteJSON(w, http.StatusOK, map[string]any{"today_calls": 0, "total_calls": 0})
+		return
+	}
+	util.WriteJSON(w, http.StatusOK, a.callStats.Snapshot())
+}
+
+func (a *App) handleShareImageFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	rel, err := imageShareRequestPath(r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	root := filepath.Join(a.config.DataDir, "share_images")
+	if a.shares != nil {
+		root = a.shares.ImageDir()
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	full := filepath.Join(rootAbs, filepath.FromSlash(rel))
+	fullAbs, err := filepath.Abs(full)
+	if err != nil || !pathInsideRoot(rootAbs, fullAbs) {
+		http.NotFound(w, r)
+		return
+	}
+	if info, err := os.Stat(fullAbs); err == nil && !info.IsDir() {
+		http.ServeFile(w, r, fullAbs)
+		return
+	}
+	http.NotFound(w, r)
 }
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -419,6 +682,7 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) writeLoginResponse(w http.ResponseWriter, identity service.Identity, token string) {
 	permissions := a.identityPermissions(identity)
+	subjectID := identityScope(identity)
 	payload := map[string]any{
 		"ok":              true,
 		"version":         version.Get(),
@@ -426,7 +690,7 @@ func (a *App) writeLoginResponse(w http.ResponseWriter, identity service.Identit
 		"role":            identity.Role,
 		"role_id":         identity.RoleID,
 		"role_name":       identity.RoleName,
-		"subject_id":      identity.ID,
+		"subject_id":      subjectID,
 		"name":            identity.Name,
 		"provider":        identity.Provider,
 		"credential_id":   identity.CredentialID,
@@ -435,10 +699,129 @@ func (a *App) writeLoginResponse(w http.ResponseWriter, identity service.Identit
 		"api_permissions": permissions.APIPermissions,
 		"menus":           service.FilterMenuPermissions(permissions.MenuPaths),
 	}
+	if a.profiles != nil && identity.Role == service.AuthRoleUser {
+		for key, value := range a.profiles.PublicForUser(subjectID) {
+			payload[key] = value
+		}
+	}
+	if a.notifications != nil && identity.Role == service.AuthRoleUser {
+		payload["notifications_unread"] = a.notifications.UnreadCountForOwner(subjectID)
+	}
 	if token == "" {
 		delete(payload, "token")
 	}
 	util.WriteJSON(w, http.StatusOK, payload)
+}
+
+func (a *App) handleInviteMe(w http.ResponseWriter, r *http.Request) {
+	identity, ok := a.requireIdentity(w, r, "")
+	if !ok {
+		return
+	}
+	if a.profiles == nil {
+		util.WriteJSON(w, http.StatusOK, map[string]any{})
+		return
+	}
+	util.WriteJSON(w, http.StatusOK, a.profiles.InviteSummary(identity, a.resolveImageBaseURL(r), a.config.InviteRewardQuota(), a.config.InviteeBonusQuota()))
+}
+
+func (a *App) handleCheckinStatus(w http.ResponseWriter, r *http.Request) {
+	identity, ok := a.requireIdentity(w, r, "")
+	if !ok {
+		return
+	}
+	if a.profiles == nil {
+		util.WriteJSON(w, http.StatusOK, map[string]any{"enabled": false})
+		return
+	}
+	util.WriteJSON(w, http.StatusOK, a.profiles.CheckinStatus(identity, a.config.CheckinRewards(), a.config.CheckinEnabled()))
+}
+
+func (a *App) handleCheckin(w http.ResponseWriter, r *http.Request) {
+	identity, ok := a.requireIdentity(w, r, "")
+	if !ok {
+		return
+	}
+	if a.profiles == nil {
+		util.WriteError(w, http.StatusBadRequest, "checkin service unavailable")
+		return
+	}
+	result, err := a.profiles.Checkin(identity, a.config.CheckinRewards(), a.config.CheckinEnabled())
+	if err != nil {
+		if strings.Contains(err.Error(), "今日已签到") {
+			util.WriteJSON(w, http.StatusOK, map[string]any{"already_checked": true, "reward": 0, "state": result})
+			return
+		}
+		util.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	reward := util.ToInt(result["reward"], 0)
+	day := util.ToInt(result["day"], util.ToInt(result["current_streak"], 0))
+	quotaAfter := util.ToInt(result["image_quota_total"], 0)
+	a.emitCheckinNotification(identityScope(identity), day, reward, quotaAfter)
+	util.WriteJSON(w, http.StatusOK, map[string]any{"already_checked": false, "reward": reward, "state": result})
+}
+
+func (a *App) handleCheckinAdminConfig(w http.ResponseWriter, r *http.Request) {
+	identity, ok := a.requireIdentity(w, r, "")
+	if !ok {
+		return
+	}
+	if identity.Role != service.AuthRoleAdmin {
+		util.WriteError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		util.WriteJSON(w, http.StatusOK, map[string]any{"enabled": a.config.CheckinEnabled(), "rewards": a.config.CheckinRewards()})
+	case http.MethodPut, http.MethodPost:
+		body, err := readJSONMap(r)
+		if err != nil {
+			util.WriteError(w, http.StatusBadRequest, "invalid json body")
+			return
+		}
+		updates := map[string]any{}
+		if value, ok := body["enabled"]; ok {
+			updates["checkin_enabled"] = util.ToBool(value)
+		}
+		if value, ok := body["rewards"]; ok {
+			updates["checkin_rewards"] = value
+		}
+		if len(updates) == 0 {
+			util.WriteError(w, http.StatusBadRequest, "no updates provided")
+			return
+		}
+		if _, err := a.config.Update(updates); err != nil {
+			util.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		util.WriteJSON(w, http.StatusOK, map[string]any{"enabled": a.config.CheckinEnabled(), "rewards": a.config.CheckinRewards()})
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *App) handleCheckinAdminLogs(w http.ResponseWriter, r *http.Request) {
+	identity, ok := a.requireIdentity(w, r, "")
+	if !ok {
+		return
+	}
+	if identity.Role != service.AuthRoleAdmin {
+		util.WriteError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	limit := util.ToInt(r.URL.Query().Get("limit"), 100)
+	result := map[string]any{"items": []map[string]any{}}
+	if a.profiles != nil {
+		result = a.profiles.CheckinLogs(limit)
+	}
+	result["enabled"] = a.config.CheckinEnabled()
+	result["rewards"] = a.config.CheckinRewards()
+	util.WriteJSON(w, http.StatusOK, result)
 }
 
 func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
@@ -815,6 +1198,29 @@ func imageThumbnailRequestPath(r *http.Request) (string, error) {
 	return rel, nil
 }
 
+func imageShareRequestPath(r *http.Request) (string, error) {
+	raw := strings.TrimPrefix(r.URL.EscapedPath(), "/share-images/")
+	if raw == "" || raw == r.URL.EscapedPath() {
+		return "", errors.New("invalid share image path")
+	}
+	rel, err := url.PathUnescape(raw)
+	if err != nil {
+		return "", err
+	}
+	if rel == "" || strings.Contains(rel, "..") {
+		return "", errors.New("invalid share image path")
+	}
+	return rel, nil
+}
+
+func pathInsideRoot(root, target string) bool {
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
+}
+
 func (a *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 	if _, ok := a.requireIdentity(w, r, ""); !ok {
 		return
@@ -1001,8 +1407,19 @@ func isPermissionCheckSkipped(path string) bool {
 		return true
 	case "/api/profile/prompt-favorites":
 		return true
+	case "/api/notifications":
+		return true
 	default:
-		return strings.HasPrefix(path, "/api/profile/api-key/") || strings.HasPrefix(path, "/api/profile/prompt-favorites/")
+		if strings.HasPrefix(path, "/api/profile/api-key/") || strings.HasPrefix(path, "/api/profile/prompt-favorites/") {
+			return true
+		}
+		// /api/notifications/<id>/read and /api/notifications/<id> are user-scoped and the
+		// handler enforces ownership. Skip the static permission check so default users can
+		// read their own bell without bespoke role wiring.
+		if strings.HasPrefix(path, "/api/notifications/") {
+			return true
+		}
+		return false
 	}
 }
 
@@ -1079,6 +1496,8 @@ func readMultipartImageBody(r *http.Request) (map[string]any, []protocol.Uploade
 		"model":              firstNonEmpty(firstForm(r.MultipartForm, "model"), util.ImageModelAuto),
 		"n":                  util.ToInt(firstForm(r.MultipartForm, "n"), 1),
 		"size":               firstForm(r.MultipartForm, "size"),
+		"requested_size":     firstForm(r.MultipartForm, "requested_size"),
+		"image_resolution":   firstForm(r.MultipartForm, "image_resolution"),
 		"quality":            firstForm(r.MultipartForm, "quality"),
 		"output_format":      firstForm(r.MultipartForm, "output_format"),
 		"output_compression": firstForm(r.MultipartForm, "output_compression"),
@@ -1107,6 +1526,18 @@ func readMultipartImageBody(r *http.Request) (map[string]any, []protocol.Uploade
 		}
 	}
 	return body, images, nil
+}
+
+func (a *App) imageQuotaChargeForPayload(payload map[string]any, requested int) (int, bool) {
+	requested = maxInt(1, requested)
+	switch service.NormalizeImageResolutionPreset(util.Clean(payload["image_resolution"])) {
+	case "2k":
+		return maxInt(1, a.config.ImageUpscale2KQuotaCost()) * requested, true
+	case "4k":
+		return maxInt(1, a.config.ImageUpscale4KQuotaCost()) * requested, true
+	default:
+		return requested, false
+	}
 }
 
 func firstForm(form *multipart.Form, key string) string {
@@ -1256,6 +1687,9 @@ func (a *App) recordGeneratedImages(identity service.Identity, urls []string, vi
 	}
 	ownerID := identityScope(identity)
 	a.images.RecordGeneratedImages(urls, ownerID, identityDisplayName(identity), visibility)
+	if a.callStats != nil {
+		a.callStats.Record(1)
+	}
 }
 
 func (a *App) recordGeneratedImagesForPayload(identity service.Identity, urls []string, visibility string, payload map[string]any) {
@@ -1268,6 +1702,9 @@ func (a *App) recordGeneratedImagesForPayload(identity service.Identity, urls []
 		RequestedSize:    util.Clean(payload["size"]),
 		OutputFormat:     service.NormalizeImageOutputFormat(util.Clean(payload["output_format"])),
 	})
+	if a.callStats != nil {
+		a.callStats.Record(1)
+	}
 }
 
 func (a *App) decorateImageList(payload map[string]any) {
@@ -1315,23 +1752,51 @@ func (a *App) runLoggedImageTask(ctx context.Context, identity service.Identity,
 	payload["owner_id"] = identityScope(identity)
 	payload["owner_name"] = identityDisplayName(identity)
 	model := firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto)
+	requested := maxInt(1, util.ToInt(payload["n"], 1))
+	quotaCount, fixedCharge := a.imageQuotaChargeForPayload(payload, requested)
+	refund := func(int) {}
+	if a.profiles != nil {
+		if reserved, err := a.profiles.ReserveQuota(identity, quotaCount); err == nil && reserved != nil {
+			refund = reserved
+		} else if err != nil {
+			a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "failed", http.StatusTooManyRequests, err.Error(), nil)
+			return map[string]any{"message": err.Error()}, err
+		}
+	}
 	result, err := run(ctx, payload)
 	urls := collectURLs(result)
-	a.recordGeneratedImagesForPayload(identity, urls, util.Clean(payload["visibility"]), payload)
 	if err != nil {
+		refund(quotaCount)
 		a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "failed", protocolErrorHTTPStatus(err), err.Error(), urls)
 		return result, err
 	}
-	if len(util.AsMapSlice(result["data"])) == 0 {
+	dataCount := len(util.AsMapSlice(result["data"]))
+	if dataCount == 0 {
 		message := firstNonEmpty(util.Clean(result["message"]), "image task returned no image data")
+		refund(quotaCount)
 		a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "failed", http.StatusBadGateway, message, urls)
 		return result, nil
 	}
+	if !fixedCharge && dataCount < requested {
+		refund(requested - dataCount)
+	}
+	a.recordGeneratedImagesForPayload(identity, urls, util.Clean(payload["visibility"]), payload)
 	a.logCall(identity, summary, http.MethodPost, endpoint, model, start, "success", http.StatusOK, "", urls)
 	return result, nil
 }
 
 func (a *App) runResponsesImageGenerationTask(ctx context.Context, payload map[string]any) (map[string]any, error) {
+	model := firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto)
+	if util.IsImageGenerationModel(model) {
+		body := util.CopyMap(payload)
+		images := protocol.ExtractResponseImages(payload["images"])
+		if len(images) > 0 {
+			result, _, err := a.engine.HandleImageEdits(ctx, body, images)
+			return result, err
+		}
+		result, _, err := a.engine.HandleImageGenerations(ctx, body)
+		return result, err
+	}
 	body := responseImageTaskBody(payload)
 	completed, _, err := a.engine.HandleResponsesScoped(ctx, body, util.Clean(payload["owner_id"]))
 	if err != nil {
@@ -1366,7 +1831,9 @@ func responsesImageTaskTextOutputError(result map[string]any, completed map[stri
 }
 
 func responseImageTaskBody(payload map[string]any) map[string]any {
-	prompt := util.Clean(payload["prompt"])
+	size := util.Clean(payload["size"])
+	quality := util.Clean(payload["quality"])
+	prompt := protocol.BuildImagePrompt(util.Clean(payload["prompt"]), size, quality)
 	images := responseImageTaskDataURLs(payload["images"])
 	input := any(prompt)
 	if len(images) > 0 {
@@ -1379,7 +1846,7 @@ func responseImageTaskBody(payload map[string]any) map[string]any {
 	tool := map[string]any{
 		"type":          "image_generation",
 		"action":        responseImageTaskAction(images),
-		"size":          firstNonEmpty(util.Clean(payload["size"]), "auto"),
+		"size":          protocol.ResponseImageToolSize(size),
 		"output_format": service.NormalizeImageOutputFormat(util.Clean(payload["output_format"])),
 	}
 	if util.Clean(tool["output_format"]) != "png" {
@@ -1387,7 +1854,7 @@ func responseImageTaskBody(payload map[string]any) map[string]any {
 			tool["output_compression"] = compression
 		}
 	}
-	if quality := util.Clean(payload["quality"]); quality != "" && util.Clean(payload["model"]) != util.ImageModelCodex {
+	if quality != "" && util.Clean(payload["model"]) != util.ImageModelCodex {
 		tool["quality"] = quality
 	}
 	body := map[string]any{
@@ -1603,6 +2070,75 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func (a *App) serveWeb(w http.ResponseWriter, r *http.Request) {
+	if a.serveShareWebMeta(w, r) {
+		return
+	}
 	frontend.Handler().ServeHTTP(w, r)
+}
+
+func (a *App) serveShareWebMeta(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if r.URL.Path != "/share" || a.shares == nil {
+		return false
+	}
+	shareID := strings.TrimSpace(r.URL.Query().Get("id"))
+	if shareID == "" {
+		return false
+	}
+	share := a.shares.Get(shareID)
+	if share == nil {
+		return false
+	}
+	indexHTML, err := frontend.IndexHTML()
+	if err != nil {
+		return false
+	}
+	body := string(indexHTML)
+	title := "DF Image 作品分享"
+	description := "全新 GPT-image-2，全球最牛生图模型，注册即送 100 张图片生成。"
+	imageURL := util.Clean(share["image_url"])
+	imageType := util.Clean(share["mime_type"])
+	if imageType == "" {
+		imageType = "image/png"
+	}
+	shareURL := util.Clean(share["share_url"])
+	body = defaultShareImageMetaPattern.ReplaceAllString(body, "")
+	meta := strings.Join([]string{
+		`<title>` + html.EscapeString(title) + `</title>`,
+		`<meta name="description" content="` + html.EscapeString(description) + `">`,
+		`<meta property="og:type" content="website">`,
+		`<meta property="og:title" content="` + html.EscapeString(title) + `">`,
+		`<meta property="og:description" content="` + html.EscapeString(description) + `">`,
+		`<meta property="og:url" content="` + html.EscapeString(shareURL) + `">`,
+		`<meta property="og:image" content="` + html.EscapeString(imageURL) + `">`,
+		`<meta property="og:image:secure_url" content="` + html.EscapeString(imageURL) + `">`,
+		`<meta property="og:image:type" content="` + html.EscapeString(imageType) + `">`,
+		`<meta name="twitter:card" content="summary_large_image">`,
+		`<meta name="twitter:title" content="` + html.EscapeString(title) + `">`,
+		`<meta name="twitter:description" content="` + html.EscapeString(description) + `">`,
+		`<meta name="twitter:image" content="` + html.EscapeString(imageURL) + `">`,
+		`<link rel="image_src" href="` + html.EscapeString(imageURL) + `">`,
+	}, "\n")
+	if strings.Contains(body, "<head>") {
+		body = strings.Replace(body, "<head>", "<head>\n"+meta, 1)
+	} else if strings.Contains(body, "</head>") {
+		body = strings.Replace(body, "</head>", meta+"\n</head>", 1)
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, no-store")
+	if r.Method == http.MethodHead {
+		return true
+	}
+	_, _ = io.WriteString(w, body)
+	return true
 }
