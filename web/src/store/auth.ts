@@ -24,6 +24,9 @@ export type StoredAuthSession = {
   menuPaths: string[];
   apiPermissions: string[];
   menus: AuthMenuItem[];
+  imageQuotaTotal?: number | null;
+  imageQuotaUsed?: number;
+  imageQuotaRemaining?: number | null;
 };
 
 export const AUTH_SESSION_STORAGE_KEY = "chatgpt2api_auth_session";
@@ -75,6 +78,17 @@ function normalizeMenus(value: unknown): AuthMenuItem[] {
   });
 }
 
+function normalizeOptionalNumber(value: unknown): number | null | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null || value === "") {
+    return null;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function normalizeSession(value: unknown, fallbackKey = ""): StoredAuthSession | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -98,6 +112,9 @@ function normalizeSession(value: unknown, fallbackKey = ""): StoredAuthSession |
     menuPaths: normalizeStringList(candidate.menuPaths),
     apiPermissions: normalizeStringList(candidate.apiPermissions),
     menus: normalizeMenus(candidate.menus),
+    imageQuotaTotal: normalizeOptionalNumber(candidate.imageQuotaTotal),
+    imageQuotaUsed: Math.max(0, Number(candidate.imageQuotaUsed ?? 0) || 0),
+    imageQuotaRemaining: normalizeOptionalNumber(candidate.imageQuotaRemaining),
   };
 }
 
@@ -105,7 +122,7 @@ export function canAccessPath(session: StoredAuthSession | null | undefined, pat
   if (!session) {
     return false;
   }
-  if (path === "/profile") {
+  if (path === "/profile" || path === "/ecommerce-agent") {
     return true;
   }
   if (session.role === "admin") {

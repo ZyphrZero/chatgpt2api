@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ChevronDown, ChevronUp, Github, LogOut, MoonStar, Send, Sun, UserCircle2 } from "lucide-react";
+import { ChevronDown, ChevronUp, LogOut, MoonStar, Sun, UserCircle2 } from "lucide-react";
 import { motion, useReducedMotion, type Transition } from "motion/react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 
 import { AnnouncementNotifications } from "@/components/announcement-banner";
+import { NotificationBell } from "@/components/notification-bell";
+import { CheckinWidget } from "@/components/checkin-widget";
 import { ImageTaskQueue } from "@/components/image-task-queue";
 import webConfig from "@/constants/common-env";
 import {
@@ -32,9 +34,11 @@ import {
 
 const navItems = [
   { href: "/image", label: "创作台" },
+  { href: "/ecommerce-agent", label: "电商AI-Agent" },
   { href: "/accounts", label: "号池管理" },
   { href: "/register", label: "注册机" },
   { href: "/image-manager", label: "图片库" },
+  { href: "/invite", label: "邀请中心" },
   { href: "/users", label: "用户管理" },
   { href: "/rbac", label: "角色权限" },
   { href: "/logs", label: "日志管理" },
@@ -57,6 +61,20 @@ const reducedNavActiveTransition: Transition = {
 function formatAvailableQuota(accounts: Account[]) {
   const availableAccounts = accounts.filter((account) => account.status !== "禁用");
   return String(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
+}
+
+function formatUserQuota(session: StoredAuthSession | null | undefined) {
+  if (!session || session.role !== "user") {
+    return "--";
+  }
+  if (session.imageQuotaTotal === null || session.imageQuotaTotal === undefined) {
+    return "不限";
+  }
+  const remaining =
+    session.imageQuotaRemaining === null || session.imageQuotaRemaining === undefined
+      ? Math.max(0, session.imageQuotaTotal - (session.imageQuotaUsed || 0))
+      : Math.max(0, session.imageQuotaRemaining);
+  return String(remaining);
 }
 
 function ThemeToggleButton({
@@ -214,29 +232,6 @@ function AccountMenu({
             个人中心
           </Link>
 
-          <div className="grid grid-cols-2 gap-2">
-            <a
-              href="https://t.me/+YBR7t_CPOYBkYzU1"
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm text-muted-foreground transition hover:bg-accent hover:text-accent-foreground"
-              onClick={() => setOpen(false)}
-            >
-              <Send className="size-4" />
-              Telegram
-            </a>
-            <a
-              href="https://github.com/ZyphrZero/chatgpt2api"
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm text-muted-foreground transition hover:bg-accent hover:text-accent-foreground"
-              onClick={() => setOpen(false)}
-            >
-              <Github className="size-4" />
-              GitHub
-            </a>
-          </div>
-
           <button
             type="button"
             className="flex items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-50 hover:text-rose-700 dark:hover:bg-rose-950/30"
@@ -299,6 +294,11 @@ export function TopNav() {
   }, []);
 
   useEffect(() => {
+    if (session?.role === "user") {
+      setAvailableQuota(formatUserQuota(session));
+      return;
+    }
+
     if (!hasAPIPermission(session, "GET", "/api/accounts")) {
       setAvailableQuota("--");
       return;
@@ -376,7 +376,7 @@ export function TopNav() {
             type="button"
             variant="ghost"
             className={cn(
-              "font-display h-9 max-w-[190px] justify-start rounded-full px-1.5 pr-2 text-[15px] font-semibold text-[#18181b] shadow-none hover:bg-black/[0.04] hover:text-[#1456f0] sm:max-w-none dark:text-foreground dark:hover:text-sky-300",
+              "font-display h-9 max-w-[150px] justify-start rounded-full px-1.5 pr-2 text-[15px] font-semibold text-[#18181b] shadow-none hover:bg-black/[0.04] hover:text-[#1456f0] sm:max-w-[190px] lg:max-w-none dark:text-foreground dark:hover:text-sky-300",
               navCollapsed ? "bg-black/[0.04] text-[#1456f0] dark:bg-accent dark:text-sky-300" : "",
             )}
             aria-controls={PRIMARY_NAV_ID}
@@ -394,9 +394,11 @@ export function TopNav() {
             <span className="truncate">chatgpt2api</span>
             {navCollapsed ? <ChevronDown aria-hidden="true" /> : <ChevronUp aria-hidden="true" />}
           </Button>
-          <div className="ml-auto flex shrink-0 items-center gap-1 lg:hidden">
-            {canAccessImageTasks ? <ImageTaskQueue className="size-8 px-0" /> : null}
-            <AnnouncementNotifications target="image" className="size-8" />
+          <div className="hide-scrollbar ml-auto flex max-w-[68%] shrink-0 items-center gap-0.5 overflow-x-auto lg:hidden">
+            {canAccessImageTasks ? <ImageTaskQueue className="size-8 shrink-0 px-0" /> : null}
+            <CheckinWidget session={session} className="h-8 shrink-0 px-2" />
+            <AnnouncementNotifications target="image" className="size-8 shrink-0" />
+            {session ? <NotificationBell className="size-8 shrink-0" /> : null}
             <ThemeToggleButton theme={theme} onToggle={handleThemeToggle} />
             <AccountMenu
               session={session}
@@ -421,7 +423,9 @@ export function TopNav() {
         </nav>
         <div className="hidden items-center justify-end gap-1.5 lg:flex">
           {canAccessImageTasks ? <ImageTaskQueue /> : null}
-          <AnnouncementNotifications target="image" className="size-8" />
+          <CheckinWidget session={session} />
+          <AnnouncementNotifications target="image" className="size-8" autoDialog />
+          {session ? <NotificationBell className="size-8" /> : null}
           <ThemeToggleButton theme={theme} onToggle={handleThemeToggle} />
           <AccountMenu
             session={session}
