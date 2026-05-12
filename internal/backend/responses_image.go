@@ -43,6 +43,7 @@ const (
 	responsesImageMaxPixels    = 8294400
 
 	officialImageDownloadAttempts = 3
+	officialImagePollFallback     = 120 * time.Second
 )
 
 var officialImageDownloadRetryDelay = 750 * time.Millisecond
@@ -1122,7 +1123,7 @@ func (c *Client) resolveOfficialImageResults(ctx context.Context, request Respon
 	fileIDs := filterOfficialImageIDs(event.FileIDs)
 	sedimentIDs := filterOfficialImageIDs(event.SedimentIDs)
 	if conversationID != "" && len(fileIDs) == 0 && len(sedimentIDs) == 0 {
-		polledFiles, polledSediments, err := c.pollOfficialImageResults(ctx, conversationID, 120*time.Second)
+		polledFiles, polledSediments, err := c.pollOfficialImageResults(ctx, conversationID, officialImagePollTimeout(ctx))
 		if err != nil {
 			return nil, err
 		}
@@ -1174,6 +1175,16 @@ func filterOfficialImageIDs(values []string) []string {
 	return out
 }
 
+func officialImagePollTimeout(ctx context.Context) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining > 0 {
+			return remaining
+		}
+	}
+	return officialImagePollFallback
+}
+
 func (c *Client) pollOfficialImageResults(ctx context.Context, conversationID string, timeout time.Duration) ([]string, []string, error) {
 	if strings.TrimSpace(conversationID) == "" {
 		return nil, nil, nil
@@ -1193,7 +1204,7 @@ func (c *Client) pollOfficialImageResults(ctx context.Context, conversationID st
 		case <-time.After(4 * time.Second):
 		}
 	}
-	return nil, nil, nil
+	return nil, nil, fmt.Errorf("image result was not ready before timeout; increase image task timeout or reduce prompt/reference complexity")
 }
 
 func (c *Client) fetchOfficialConversationImageIDs(ctx context.Context, conversationID string) ([]string, []string, error) {

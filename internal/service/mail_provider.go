@@ -735,7 +735,21 @@ func (p *registerTempMailLOLProvider) FetchLatestMessage(mailbox map[string]any)
 
 func (p *registerDuckMailProvider) CreateMailbox(username string) (map[string]any, error) {
 	apiKey := util.Clean(p.entry["api_key"])
+	domains, err := registerMailRequestAny(p.client, http.MethodGet, "https://api.duckmail.sbs/domains", map[string]string{
+		"Authorization": "Bearer " + apiKey,
+		"User-Agent":    p.conf.UserAgent,
+		"Accept":        "application/json",
+	}, nil, nil, http.StatusOK, http.StatusCreated)
+	if err != nil {
+		return nil, err
+	}
 	domain := util.Clean(p.entry["default_domain"])
+	for _, item := range duckMailItems(domains) {
+		if value := util.Clean(item["domain"]); value != "" {
+			domain = value
+			break
+		}
+	}
 	if domain == "" {
 		domain = "duckmail.sbs"
 	}

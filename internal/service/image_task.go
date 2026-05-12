@@ -370,6 +370,9 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 			message = "图片生成超时，请稍后重试或降低分辨率"
 		}
 		updates := map[string]any{"status": status, "error": message, "data": taskResultData(result)}
+		if mode == "generate" || mode == "edit" {
+			updates["output_statuses"] = failedImageOutputStatuses(taskCount(mode, payload), result)
+		}
 		if outputType := util.Clean(result["output_type"]); outputType != "" {
 			updates["output_type"] = outputType
 		}
@@ -808,6 +811,22 @@ func initialImageOutputStatuses(count int) []string {
 	return statuses
 }
 
+func failedImageOutputStatuses(count int, result map[string]any) []string {
+	statuses := initialImageOutputStatuses(count)
+	for index := range statuses {
+		statuses[index] = "error"
+	}
+	for index, item := range util.AsMapSlice(result["data"]) {
+		if index >= len(statuses) {
+			break
+		}
+		if hasImageTaskOutputData(item) {
+			statuses[index] = "success"
+		}
+	}
+	return statuses
+}
+
 func normalizedImageOutputStatuses(mode string, count int, value any) []string {
 	if mode != "generate" && mode != "edit" {
 		return nil
@@ -821,7 +840,7 @@ func normalizedImageOutputStatuses(mode string, count int, value any) []string {
 		status := "queued"
 		if index < len(source) {
 			switch source[index] {
-			case "queued", "running", "success":
+			case "queued", "running", "success", "error":
 				status = source[index]
 			}
 		}

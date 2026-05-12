@@ -58,6 +58,9 @@ export function resolveImageRequestURL(src: string) {
   if (apiBase && isManagedImagePath(candidate.pathname)) {
     return new URL(`${candidate.pathname}${candidate.search}`, apiBase).toString();
   }
+  if (isManagedImagePath(candidate.pathname)) {
+    return new URL(`${candidate.pathname}${candidate.search}`, browserBase).toString();
+  }
 
   return candidate.toString();
 }
