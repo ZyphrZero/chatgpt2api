@@ -290,6 +290,9 @@ func TestPasswordAccountLoginAndRegistrationToggle(t *testing.T) {
 	if res.Code != http.StatusForbidden {
 		t.Fatalf("disabled registration status = %d body = %s", res.Code, res.Body.String())
 	}
+	if !strings.Contains(res.Body.String(), "已关闭注册通道") {
+		t.Fatalf("disabled registration body = %s", res.Body.String())
+	}
 
 	req = httptest.NewRequest(http.MethodPost, "/api/settings", strings.NewReader(`{"registration_enabled":true}`))
 	req.Header.Set("Authorization", "Bearer "+adminToken)
@@ -2877,6 +2880,9 @@ func TestLinuxDoOAuthCallbackCreatesSession(t *testing.T) {
 
 	app := newTestApp(t)
 	defer app.Close()
+	if _, err := app.config.Update(map[string]any{"registration_enabled": true}); err != nil {
+		t.Fatalf("enable registration: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/linuxdo/start?redirect=/settings", nil)
 	res := httptest.NewRecorder()
@@ -2948,6 +2954,127 @@ func TestLinuxDoOAuthCallbackCreatesSession(t *testing.T) {
 	linuxdoUser := findHTTPItem(logItems(users), "linuxdo:123")
 	if linuxdoUser == nil || linuxdoUser["linuxdo_level"] != "2" {
 		t.Fatalf("oauth linuxdo user level = %#v", linuxdoUser)
+	}
+}
+
+func TestLinuxDoOAuthCallbackRejectsNewUserWhenRegistrationDisabled(t *testing.T) {
+	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/token":
+			util.WriteJSON(w, http.StatusOK, map[string]any{"access_token": "linuxdo-access", "token_type": "Bearer"})
+		case "/user":
+			util.WriteJSON(w, http.StatusOK, map[string]any{"id": 456, "username": "blocked_linuxdo", "trust_level": 1})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer oauthServer.Close()
+
+	t.Setenv("CHATGPT2API_LINUXDO_ENABLED", "true")
+	t.Setenv("CHATGPT2API_LINUXDO_CLIENT_ID", "client-id")
+	t.Setenv("CHATGPT2API_LINUXDO_CLIENT_SECRET", "client-secret")
+	t.Setenv("CHATGPT2API_LINUXDO_AUTHORIZE_URL", oauthServer.URL+"/authorize")
+	t.Setenv("CHATGPT2API_LINUXDO_TOKEN_URL", oauthServer.URL+"/token")
+	t.Setenv("CHATGPT2API_LINUXDO_USERINFO_URL", oauthServer.URL+"/user")
+	t.Setenv("CHATGPT2API_LINUXDO_REDIRECT_URL", "http://chatgpt2api.test/auth/linuxdo/oauth/callback")
+	t.Setenv("CHATGPT2API_LINUXDO_FRONTEND_REDIRECT_URL", "/auth/linuxdo/callback")
+
+	app := newTestApp(t)
+	defer app.Close()
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/linuxdo/start?redirect=/settings", nil)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusFound {
+		t.Fatalf("start status = %d body = %s", res.Code, res.Body.String())
+	}
+	authorizeURL, err := url.Parse(res.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse authorize location: %v", err)
+	}
+	state := authorizeURL.Query().Get("state")
+	if state == "" {
+		t.Fatalf("authorize location missing state: %s", authorizeURL.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/auth/linuxdo/oauth/callback?code=oauth-code&state="+url.QueryEscape(state), nil)
+	for _, cookie := range res.Result().Cookies() {
+		req.AddCookie(cookie)
+	}
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusFound {
+		t.Fatalf("callback status = %d body = %s", res.Code, res.Body.String())
+	}
+	callbackURL, err := url.Parse(res.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse callback location: %v", err)
+	}
+	fragment, err := url.ParseQuery(callbackURL.Fragment)
+	if err != nil {
+		t.Fatalf("parse callback fragment: %v", err)
+	}
+	if fragment.Get("error") != "registration_disabled" || fragment.Get("error_message") != "已关闭注册通道" {
+		t.Fatalf("callback fragment = %#v", fragment)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/admin/users", nil)
+	req.Header.Set("Authorization", adminAuthHeader(t, app))
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("admin users status = %d body = %s", res.Code, res.Body.String())
+	}
+	var users map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &users); err != nil {
+		t.Fatalf("admin users json: %v", err)
+	}
+	if linuxdoUser := findHTTPItem(logItems(users), "linuxdo:456"); linuxdoUser != nil {
+		t.Fatalf("disabled registration created linuxdo user: %#v", linuxdoUser)
+	}
+
+	if _, _, err := app.auth.UpsertLinuxDoSession(service.AuthOwner{
+		ID:           "linuxdo:456",
+		Name:         "blocked_linuxdo",
+		Provider:     service.AuthProviderLinuxDo,
+		LinuxDoLevel: "1",
+	}); err != nil {
+		t.Fatalf("seed existing linuxdo user: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/auth/linuxdo/start?redirect=/settings", nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusFound {
+		t.Fatalf("second start status = %d body = %s", res.Code, res.Body.String())
+	}
+	authorizeURL, err = url.Parse(res.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse second authorize location: %v", err)
+	}
+	state = authorizeURL.Query().Get("state")
+	if state == "" {
+		t.Fatalf("second authorize location missing state: %s", authorizeURL.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, "/auth/linuxdo/oauth/callback?code=oauth-code&state="+url.QueryEscape(state), nil)
+	for _, cookie := range res.Result().Cookies() {
+		req.AddCookie(cookie)
+	}
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusFound {
+		t.Fatalf("second callback status = %d body = %s", res.Code, res.Body.String())
+	}
+	callbackURL, err = url.Parse(res.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse second callback location: %v", err)
+	}
+	fragment, err = url.ParseQuery(callbackURL.Fragment)
+	if err != nil {
+		t.Fatalf("parse second callback fragment: %v", err)
+	}
+	if fragment.Get("error") != "" || fragment.Get("key") == "" || fragment.Get("subject_id") != "linuxdo:456" {
+		t.Fatalf("existing user callback fragment = %#v", fragment)
 	}
 }
 

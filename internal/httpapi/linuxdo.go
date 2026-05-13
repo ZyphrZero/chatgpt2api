@@ -163,13 +163,17 @@ func (a *App) handleLinuxDoOAuthCallback(w http.ResponseWriter, r *http.Request)
 	}
 
 	ownerID := linuxDoOwnerID(userInfo.Subject)
-	sessionItem, rawSessionKey, err := a.auth.UpsertLinuxDoSession(service.AuthOwner{
+	sessionItem, rawSessionKey, err := a.auth.UpsertLinuxDoSessionIfAllowed(service.AuthOwner{
 		ID:           ownerID,
 		Name:         userInfo.Username,
 		Provider:     service.AuthProviderLinuxDo,
 		LinuxDoLevel: userInfo.Level,
-	})
+	}, a.config.RegistrationEnabled())
 	if err != nil {
+		if errors.Is(err, service.ErrAuthUserCreationDisabled) {
+			redirectLinuxDoOAuthError(w, r, frontendCallback, "registration_disabled", "已关闭注册通道", "")
+			return
+		}
 		redirectLinuxDoOAuthError(w, r, frontendCallback, "login_failed", "failed to create local session", "")
 		return
 	}

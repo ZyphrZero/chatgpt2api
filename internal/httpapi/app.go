@@ -437,7 +437,7 @@ func (a *App) handleSession(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleAccountRegister(w http.ResponseWriter, r *http.Request) {
 	if !a.config.RegistrationEnabled() {
-		util.WriteError(w, http.StatusForbidden, "registration is disabled")
+		util.WriteError(w, http.StatusForbidden, "已关闭注册通道")
 		return
 	}
 	body, err := readJSONMap(r)

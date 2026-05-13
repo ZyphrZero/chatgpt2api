@@ -26,6 +26,8 @@ const (
 	rbacRolesDocumentName = "rbac_roles.json"
 )
 
+var ErrAuthUserCreationDisabled = authError("auth user creation is disabled")
+
 type Identity struct {
 	ID             string
 	Name           string
@@ -458,6 +460,14 @@ func (s *AuthService) UpsertPersonalAPIKey(identity Identity, name string) (map[
 }
 
 func (s *AuthService) UpsertLinuxDoSession(owner AuthOwner) (map[string]any, string, error) {
+	return s.upsertLinuxDoSession(owner, true)
+}
+
+func (s *AuthService) UpsertLinuxDoSessionIfAllowed(owner AuthOwner, allowCreate bool) (map[string]any, string, error) {
+	return s.upsertLinuxDoSession(owner, allowCreate)
+}
+
+func (s *AuthService) upsertLinuxDoSession(owner AuthOwner, allowCreate bool) (map[string]any, string, error) {
 	owner.ID = util.Clean(owner.ID)
 	owner.Name = util.Clean(owner.Name)
 	owner.Provider = AuthProviderLinuxDo
@@ -508,6 +518,9 @@ func (s *AuthService) UpsertLinuxDoSession(owner AuthOwner) (map[string]any, str
 			return nil, "", err
 		}
 		return publicAuthItem(next), raw, nil
+	}
+	if !ownerSeen && !allowCreate {
+		return nil, "", ErrAuthUserCreationDisabled
 	}
 
 	item := newAuthItem(AuthRoleUser, AuthKindSession, name, owner, raw)

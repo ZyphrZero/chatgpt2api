@@ -254,6 +254,38 @@ func TestAuthServiceLinuxDoSessionOwnsAPIKeys(t *testing.T) {
 	}
 }
 
+func TestAuthServiceUpsertLinuxDoSessionHonorsCreateGate(t *testing.T) {
+	backend := storage.NewJSONBackend(
+		filepath.Join(t.TempDir(), "accounts.json"),
+		filepath.Join(t.TempDir(), "auth_keys.json"),
+	)
+	auth := NewAuthService(backend)
+
+	owner := AuthOwner{ID: "linuxdo:blocked", Name: "blocked_user", Provider: AuthProviderLinuxDo, LinuxDoLevel: "1"}
+	if _, _, err := auth.UpsertLinuxDoSessionIfAllowed(owner, false); err != ErrAuthUserCreationDisabled {
+		t.Fatalf("UpsertLinuxDoSessionIfAllowed(disallow new) error = %v, want %v", err, ErrAuthUserCreationDisabled)
+	}
+	if user := findAuthUser(auth.ListUsers(), owner.ID); user != nil {
+		t.Fatalf("disallowed linuxdo session created user: %#v", user)
+	}
+
+	created, createdRaw, err := auth.UpsertLinuxDoSessionIfAllowed(owner, true)
+	if err != nil || createdRaw == "" {
+		t.Fatalf("UpsertLinuxDoSessionIfAllowed(allow new) raw=%q err=%v", createdRaw, err)
+	}
+	if created["owner_id"] != owner.ID {
+		t.Fatalf("created linuxdo session = %#v", created)
+	}
+
+	next, nextRaw, err := auth.UpsertLinuxDoSessionIfAllowed(owner, false)
+	if err != nil || nextRaw == "" {
+		t.Fatalf("UpsertLinuxDoSessionIfAllowed(existing, disallow new) raw=%q err=%v", nextRaw, err)
+	}
+	if next["id"] != created["id"] {
+		t.Fatalf("existing linuxdo session should be updated, created=%#v next=%#v", created, next)
+	}
+}
+
 func TestAuthServiceUpsertAPIKeyForOwnerKeepsOneToken(t *testing.T) {
 	backend := storage.NewJSONBackend(
 		filepath.Join(t.TempDir(), "accounts.json"),
