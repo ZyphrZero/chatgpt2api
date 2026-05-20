@@ -175,6 +175,18 @@ function getTaskQueueItems(conversations: ImageConversation[]) {
   return items.sort((a, b) => a.turn.createdAt.localeCompare(b.turn.createdAt));
 }
 
+function scheduleQueueIdleRead(callback: () => void) {
+  if (typeof window === "undefined") {
+    return () => {};
+  }
+  if ("requestIdleCallback" in window) {
+    const idleId = window.requestIdleCallback(callback, { timeout: 1200 });
+    return () => window.cancelIdleCallback(idleId);
+  }
+  const timer = globalThis.setTimeout(callback, 300);
+  return () => globalThis.clearTimeout(timer);
+}
+
 function findQueueItem(conversations: ImageConversation[], conversationId: string, turnId: string) {
   const conversation = conversations.find((item) => item.id === conversationId);
   const turn = conversation?.turns.find((item) => item.id === turnId);
@@ -186,6 +198,7 @@ function useImageConversationsForQueue() {
 
   useEffect(() => {
     let active = true;
+    let cancelScheduledRead: () => void = () => {};
 
     const loadConversations = async () => {
       try {
@@ -200,17 +213,26 @@ function useImageConversationsForQueue() {
       }
     };
 
-    const handleRefresh = () => {
+    const scheduleRefresh = () => {
+      cancelScheduledRead();
+      cancelScheduledRead = scheduleQueueIdleRead(() => {
+        void loadConversations();
+      });
+    };
+
+    const handleConversationChanged = () => {
+      cancelScheduledRead();
       void loadConversations();
     };
 
-    void loadConversations();
-    window.addEventListener("focus", handleRefresh);
-    window.addEventListener(IMAGE_CONVERSATIONS_CHANGED_EVENT, handleRefresh);
+    scheduleRefresh();
+    window.addEventListener("focus", scheduleRefresh);
+    window.addEventListener(IMAGE_CONVERSATIONS_CHANGED_EVENT, handleConversationChanged);
     return () => {
       active = false;
-      window.removeEventListener("focus", handleRefresh);
-      window.removeEventListener(IMAGE_CONVERSATIONS_CHANGED_EVENT, handleRefresh);
+      cancelScheduledRead();
+      window.removeEventListener("focus", scheduleRefresh);
+      window.removeEventListener(IMAGE_CONVERSATIONS_CHANGED_EVENT, handleConversationChanged);
     };
   }, []);
 
@@ -257,13 +279,13 @@ function QueueItem({
   return (
     <button
       type="button"
-      className="w-full rounded-2xl border border-[#f2f3f5] bg-white p-3 text-left shadow-[0_4px_6px_rgba(0,0,0,0.05)] transition hover:border-[#dbe7ff] hover:bg-[#f8fbff] dark:border-border dark:bg-card dark:hover:bg-accent/40"
+      className="w-full rounded-2xl border border-[#f2f3f5] bg-white p-2.5 text-left shadow-[0_4px_6px_rgba(0,0,0,0.05)] transition hover:border-[#dbe7ff] hover:bg-[#f8fbff] dark:border-border dark:bg-card dark:hover:bg-accent/40 sm:p-3"
       onClick={() => onOpenConversation(item.conversationId)}
     >
-      <div className="flex items-start gap-3">
+      <div className="flex items-start gap-2.5 sm:gap-3">
         <span
           className={cn(
-            "mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-full ring-1",
+            "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full ring-1 sm:size-9",
             item.turn.status === "queued"
               ? "bg-amber-50 text-amber-700 ring-amber-100"
               : "bg-sky-50 text-[#1456f0] ring-sky-100",
@@ -273,7 +295,7 @@ function QueueItem({
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center justify-between gap-2">
-            <p className="truncate text-sm font-semibold text-[#222222] dark:text-foreground">
+            <p className="truncate text-[13px] font-semibold text-[#222222] dark:text-foreground sm:text-sm">
               {item.conversationTitle || item.turn.prompt || "未命名任务"}
             </p>
             <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1", getStatusClass(item.turn.status))}>
@@ -331,17 +353,17 @@ function CompletionItem({
   return (
     <button
       type="button"
-      className="animate-in fade-in slide-in-from-top-1 zoom-in-95 w-full rounded-2xl border border-emerald-100 bg-white p-3 text-left shadow-[0_12px_24px_-18px_rgba(16,185,129,0.55)] duration-300 hover:border-emerald-200 hover:bg-emerald-50/45 dark:border-emerald-900/50 dark:bg-card dark:hover:bg-emerald-950/20"
+      className="animate-in fade-in slide-in-from-top-1 zoom-in-95 w-full rounded-2xl border border-emerald-100 bg-white p-2.5 text-left shadow-[0_12px_24px_-18px_rgba(16,185,129,0.55)] duration-300 hover:border-emerald-200 hover:bg-emerald-50/45 dark:border-emerald-900/50 dark:bg-card dark:hover:bg-emerald-950/20 sm:p-3"
       onClick={() => onOpenConversation(item.conversationId)}
     >
-      <div className="flex items-start gap-3">
-        <span className={cn("relative mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-full ring-1", tone.iconClass)}>
+      <div className="flex items-start gap-2.5 sm:gap-3">
+        <span className={cn("relative mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-full ring-1 sm:size-9", tone.iconClass)}>
           <span className="absolute inset-0 rounded-full bg-current opacity-15 animate-ping" />
           <CheckCircle2 className="relative size-4" />
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center justify-between gap-2">
-            <p className="truncate text-sm font-semibold text-[#222222] dark:text-foreground">
+            <p className="truncate text-[13px] font-semibold text-[#222222] dark:text-foreground sm:text-sm">
               {item.conversationTitle || item.turn.prompt || "未命名任务"}
             </p>
             <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1", tone.badgeClass)}>
@@ -485,8 +507,8 @@ export function ImageTaskQueue({ className }: { className?: string }) {
           ) : null}
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="end" sideOffset={8} className="w-[min(calc(100vw-2rem),460px)] p-0">
-        <div className="flex items-center justify-between gap-3 border-b border-[#f2f3f5] px-4 py-3 dark:border-border">
+      <PopoverContent align="end" sideOffset={8} className="w-[min(calc(100vw-1rem),460px)] p-0">
+        <div className="flex items-center justify-between gap-3 border-b border-[#f2f3f5] px-3.5 py-2.5 dark:border-border sm:px-4 sm:py-3">
           <div className="flex min-w-0 items-center gap-2">
             <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-[#edf4ff] text-[#1456f0] dark:bg-sky-950/30 dark:text-sky-300">
               <ClipboardList className="size-4" />
@@ -505,8 +527,8 @@ export function ImageTaskQueue({ className }: { className?: string }) {
         </div>
 
         {queueItems.length > 0 || recentCompletions.length > 0 ? (
-          <div aria-live="polite" className="max-h-[min(68vh,560px)] overflow-y-auto bg-[#fbfcfe] p-3 dark:bg-background">
-            <div className="flex flex-col gap-3">
+          <div aria-live="polite" className="max-h-[min(58vh,460px)] overflow-y-auto bg-[#fbfcfe] p-2.5 dark:bg-background sm:max-h-[min(68vh,560px)] sm:p-3">
+            <div className="flex flex-col gap-2.5 sm:gap-3">
               {recentCompletions.map((item) => (
                 <CompletionItem
                   key={`${item.key}:${item.completedAt}`}
@@ -525,8 +547,8 @@ export function ImageTaskQueue({ className }: { className?: string }) {
             </div>
           </div>
         ) : (
-          <div className="flex flex-col items-center justify-center px-6 py-10 text-center">
-            <span className="flex size-12 items-center justify-center rounded-full bg-[#f0f0f0] text-[#45515e] dark:bg-muted dark:text-muted-foreground">
+          <div className="flex flex-col items-center justify-center px-5 py-7 text-center sm:px-6 sm:py-10">
+            <span className="flex size-10 items-center justify-center rounded-full bg-[#f0f0f0] text-[#45515e] dark:bg-muted dark:text-muted-foreground sm:size-12">
               <CheckCircle2 className="size-5" />
             </span>
             <div className="mt-3 text-sm font-semibold text-[#222222] dark:text-foreground">队列为空</div>
@@ -536,7 +558,7 @@ export function ImageTaskQueue({ className }: { className?: string }) {
             <Button
               type="button"
               size="sm"
-              className="mt-4 h-8 rounded-full bg-[#1456f0] px-3 text-xs text-white hover:bg-[#2563eb]"
+              className="mt-3 h-8 rounded-full bg-[#1456f0] px-3 text-xs text-white hover:bg-[#2563eb] sm:mt-4"
               onClick={() => {
                 setOpen(false);
                 navigate("/image");

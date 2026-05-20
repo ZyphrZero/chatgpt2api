@@ -80,11 +80,202 @@ func TestGoReleaserArchiveDoesNotShipWebDist(t *testing.T) {
 		t.Fatalf("read .goreleaser.yaml: %v", err)
 	}
 	config := string(data)
+	if !strings.Contains(config, "main: ./internal") {
+		t.Fatal(".goreleaser.yaml must build the current internal main package")
+	}
 	if strings.Contains(config, "web_dist") {
 		t.Fatal(".goreleaser.yaml must not ship runtime web_dist assets")
 	}
 	if !strings.Contains(config, "-tags=embed") {
 		t.Fatal(".goreleaser.yaml must build the binary with embedded frontend assets")
+	}
+	if !strings.Contains(config, "- deploy/docker-compose.yml") {
+		t.Fatal(".goreleaser.yaml archive must ship deploy/docker-compose.yml")
+	}
+	if strings.Contains(config, "- docker-compose.yml") {
+		t.Fatal(".goreleaser.yaml archive must not reference root docker-compose.yml")
+	}
+	if !strings.Contains(config, "dockerfile: deploy/Dockerfile.release") {
+		t.Fatal(".goreleaser.yaml Docker images must use deploy/Dockerfile.release")
+	}
+	if strings.Contains(config, "Dockerfile.goreleaser") {
+		t.Fatal(".goreleaser.yaml must not reference Dockerfile.goreleaser")
+	}
+}
+
+func TestReleaseWorkflowUsesSingleGoReleaserConfig(t *testing.T) {
+	if _, err := os.Stat(filepath.Join("..", "..", ".goreleaser.simple.yaml")); !os.IsNotExist(err) {
+		t.Fatal(".goreleaser.simple.yaml must not exist; releases use the main GoReleaser config")
+	}
+	data, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatalf("read release workflow: %v", err)
+	}
+	workflow := string(data)
+	if strings.Contains(workflow, "simple_release") {
+		t.Fatal("release workflow must not expose a simple_release path")
+	}
+	if strings.Contains(workflow, ".goreleaser.simple.yaml") {
+		t.Fatal("release workflow must not reference .goreleaser.simple.yaml")
+	}
+	if !strings.Contains(workflow, "args: release --clean --skip=validate") {
+		t.Fatal("release workflow must run the main GoReleaser release path")
+	}
+}
+
+func TestRetiredDockerBuildFilesDoNotReturn(t *testing.T) {
+	for _, path := range []string{
+		".dockerignore",
+		"Dockerfile",
+		"Dockerfile.goreleaser",
+		"docker-compose.yml",
+		"docker-compose.build.yml",
+		"docker-compose.local.yml",
+	} {
+		if _, err := os.Stat(filepath.Join("..", "..", path)); !os.IsNotExist(err) {
+			t.Fatalf("%s must not exist; Docker deployment config belongs under deploy/", path)
+		}
+	}
+}
+
+func TestServerSourceDockerBuildFilesStayUnderDeploy(t *testing.T) {
+	for _, path := range []string{
+		filepath.Join("deploy", "Dockerfile"),
+		filepath.Join("deploy", "Dockerfile.dockerignore"),
+		filepath.Join("deploy", "docker-build-limited.sh"),
+		filepath.Join("deploy", "docker-build-no-ui.sh"),
+		filepath.Join("deploy", "smoke-routes.sh"),
+	} {
+		if _, err := os.Stat(filepath.Join("..", "..", path)); err != nil {
+			t.Fatalf("%s must exist for server-side source builds: %v", path, err)
+		}
+	}
+
+	dockerfileData, err := os.ReadFile(filepath.Join("..", "..", "deploy", "Dockerfile.release"))
+	if err != nil {
+		t.Fatalf("read deploy/Dockerfile.release: %v", err)
+	}
+	dockerfile := string(dockerfileData)
+	if !strings.Contains(dockerfile, "COPY chatgpt2api /app/chatgpt2api") {
+		t.Fatal("deploy/Dockerfile.release must package the prebuilt chatgpt2api binary")
+	}
+	if strings.Contains(dockerfile, "./cmd/chatgpt2api") || strings.Contains(dockerfile, "COPY cmd ") {
+		t.Fatal("deploy/Dockerfile.release must not reference the retired cmd/chatgpt2api entrypoint")
+	}
+
+	scriptData, err := os.ReadFile(filepath.Join("..", "..", "deploy", "docker-build-limited.sh"))
+	if err != nil {
+		t.Fatalf("read deploy/docker-build-limited.sh: %v", err)
+	}
+	script := string(scriptData)
+	if !strings.Contains(script, `--file "$repo_root/deploy/Dockerfile.release"`) {
+		t.Fatal("docker-build-limited.sh must build from deploy/Dockerfile.release")
+	}
+	if !strings.Contains(script, `go build -p="$BUILD_GOMAXPROCS"`) || !strings.Contains(script, `-o "$repo_root/.deploy/chatgpt2api" ./internal`) {
+		t.Fatal("docker-build-limited.sh must build the current internal main package before packaging the release image")
+	}
+	if !strings.Contains(script, `-f "$repo_root/deploy/docker-compose.yml"`) {
+		t.Fatal("docker-build-limited.sh must run deploy/docker-compose.yml")
+	}
+	for _, want := range []string{
+		`detect_cpu_count()`,
+		`detect_memory_mib()`,
+		`default_build_cpus=2`,
+		`default_build_memory=4g`,
+		`default_build_memory=3g`,
+		`default_buildkit_max_parallelism=1`,
+		`default_build_gomaxprocs=1`,
+		`build_cpus="${BUILD_CPUS:-$default_build_cpus}"`,
+		`buildkit_max_parallelism="${BUILDKIT_MAX_PARALLELISM:-$default_buildkit_max_parallelism}"`,
+		`export BUILD_GOMAXPROCS="${BUILD_GOMAXPROCS:-$default_build_gomaxprocs}"`,
+		`export BUILD_GOMEMLIMIT="${BUILD_GOMEMLIMIT:-$default_build_gomemlimit}"`,
+		`detect_host_goarch()`,
+		`detect_docker_target()`,
+		`export BUILD_GOOS="${BUILD_GOOS:-${docker_target_os:-linux}}"`,
+		`export BUILD_GOARCH="${BUILD_GOARCH:-${docker_target_arch:-$(detect_host_goarch)}}"`,
+		`GOOS="$BUILD_GOOS" GOARCH="$BUILD_GOARCH" CGO_ENABLED="${CGO_ENABLED:-0}"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("docker-build-limited.sh must keep adaptive direct-run default %q", want)
+		}
+	}
+
+	composeData, err := os.ReadFile(filepath.Join("..", "..", "deploy", "docker-compose.yml"))
+	if err != nil {
+		t.Fatalf("read deploy/docker-compose.yml: %v", err)
+	}
+	compose := string(composeData)
+	for _, want := range []string{
+		`image: ${CHATGPT2API_IMAGE:-chatgpt2api:local}`,
+		`pull_policy: ${CHATGPT2API_PULL_POLICY:-never}`,
+		`${CHATGPT2API_PORT:-3000}:80`,
+	} {
+		if !strings.Contains(compose, want) {
+			t.Fatalf("deploy/docker-compose.yml must keep local-test safe default %q", want)
+		}
+	}
+
+	noUIData, err := os.ReadFile(filepath.Join("..", "..", "deploy", "docker-build-no-ui.sh"))
+	if err != nil {
+		t.Fatalf("read deploy/docker-build-no-ui.sh: %v", err)
+	}
+	noUI := string(noUIData)
+	for _, want := range []string{
+		`NO_UI_RESTORE_FILES`,
+		`NO_UI_KEEP_TMP`,
+		`up mode always keeps it because compose mounts .env/data.`,
+		`umask 077`,
+		`trap cleanup EXIT INT TERM`,
+		`if [ "$command" != "up" ] && [ "${NO_UI_KEEP_TMP:-0}" != "1" ]; then`,
+		`chmod 700 "$tmp_dir"`,
+		`web/src/app/page.tsx web/src/app/login/page.tsx web/src/components/login-page-image-stage.tsx`,
+		`git -C "$repo_root" show "HEAD:$file" > "$tmp_dir/$file"`,
+		`CHATGPT2API_ADMIN_PASSWORD=$smoke_password`,
+		`chmod 600 "$tmp_dir/.env"`,
+		`sh deploy/docker-build-limited.sh "$command"`,
+	} {
+		if !strings.Contains(noUI, want) {
+			t.Fatalf("docker-build-no-ui.sh must keep non-UI build behavior %q", want)
+		}
+	}
+
+	smokeData, err := os.ReadFile(filepath.Join("..", "..", "deploy", "smoke-routes.sh"))
+	if err != nil {
+		t.Fatalf("read deploy/smoke-routes.sh: %v", err)
+	}
+	smoke := string(smokeData)
+	for _, want := range []string{
+		`base_url="${1:-http://127.0.0.1:${CHATGPT2API_PORT:-3000}}"`,
+		`SMOKE_ROUTES`,
+		`SMOKE_CHECK_ASSETS`,
+		`SMOKE_MIN_ROUTE_BYTES`,
+		`tmp_error="$(mktemp -t 1818-smoke-error.XXXXXX)"`,
+		`tmp_headers="$(mktemp -t 1818-smoke-headers.XXXXXX)"`,
+		`tmp_assets="$(mktemp -t 1818-smoke-assets.XXXXXX)"`,
+		`-D "$tmp_headers"`,
+		`content_type()`,
+		`check_min_bytes()`,
+		`check_content_type()`,
+		`check_body_contains()`,
+		`check_min_bytes "$route" "$min_route_bytes"`,
+		`check_body_contains "$route" '/assets/'`,
+		`check_min_bytes "asset:$asset_path" 1`,
+		`*.js) check_content_type "asset:$asset_path" 'javascript' ;;`,
+		`*.css) check_content_type "asset:$asset_path" 'text/css' ;;`,
+		`*.ico) check_content_type "asset:$asset_path" 'image/' ;;`,
+		`collect_same_origin_assets()`,
+		`grep -Eo '(src|href)="[^"]+"'`,
+		`grep -E '^/[^/]'`,
+		`grep -Ev '^/(api|health)(/|$)'`,
+		`sort -u "$tmp_assets" > "$tmp_asset_seen"`,
+		`check_url "asset:$asset_path" "$base_url$asset_path"`,
+		`check_url "/health" "$base_url/health"`,
+		`grep -q '"status":"ok"'`,
+		`smoke passed:`,
+	} {
+		if !strings.Contains(smoke, want) {
+			t.Fatalf("smoke-routes.sh must keep route smoke behavior %q", want)
+		}
 	}
 }
 

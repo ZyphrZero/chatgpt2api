@@ -6,15 +6,17 @@ import { LoaderCircle } from "lucide-react";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 import { AnnouncementsCard } from "./components/announcements-card";
+import { CheckinSettingsCard } from "./components/checkin-settings-card";
 import { ConfigCard } from "./components/config-card";
 import { CPAPoolDialog } from "./components/cpa-pool-dialog";
 import { CPAPoolsCard } from "./components/cpa-pools-card";
 import { ImportBrowserDialog } from "./components/import-browser-dialog";
-import { LinuxDoLoginCard } from "./components/linuxdo-login-card";
 import { LogGovernanceCard } from "./components/log-governance-card";
 import { LoginPageImageCard } from "./components/login-page-image-card";
+import { SocialLoginCard } from "./components/social-login-card";
 import { SettingsHeader } from "./components/settings-header";
 import { Sub2APIConnections } from "./components/sub2api-connections";
+import { SubscriptionSettingsCard } from "./components/subscription-settings-card";
 import { VersionUpdateCard } from "./components/version-update-card";
 import { useSettingsStore } from "./store";
 
@@ -71,16 +73,22 @@ function AdminSettingsPageContent({
           <ConfigCard />
         </SettingsMasonryItem>
         <SettingsMasonryItem>
+          <CheckinSettingsCard />
+        </SettingsMasonryItem>
+        <SettingsMasonryItem>
           <LogGovernanceCard />
         </SettingsMasonryItem>
         <SettingsMasonryItem>
-          <LinuxDoLoginCard />
+          <SocialLoginCard />
         </SettingsMasonryItem>
         <SettingsMasonryItem>
           <LoginPageImageCard />
         </SettingsMasonryItem>
         <SettingsMasonryItem>
           <AnnouncementsCard />
+        </SettingsMasonryItem>
+        <SettingsMasonryItem>
+          <SubscriptionSettingsCard />
         </SettingsMasonryItem>
         <SettingsMasonryItem>
           <CPAPoolsCard />

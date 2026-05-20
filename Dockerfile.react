@@ -1,0 +1,51 @@
+# Single-stage style override that builds the React/Vite admin UI (web/) instead of the
+# upstream Yew/Trunk web-rs frontend. Use this Dockerfile when iterating on the React
+# admin: it preserves the multi-stage Go build but swaps the wasm step for `npm run build`.
+#
+#   docker build -f Dockerfile.react -t dfmcn-images-go-prod:<tag> .
+#
+# The resulting image is a drop-in replacement for the upstream Dockerfile output; the same
+# `docker run -d --name dfmcn-images ... <image>` invocation continues to work.
+
+# syntax=docker/dockerfile:1.7
+
+ARG VERSION=0.0.0-dev
+
+
+FROM --platform=$BUILDPLATFORM node:22-bookworm AS web-build
+WORKDIR /app
+COPY web/package.json web/package-lock.json* web/bun.lock* ./web/
+RUN cd web \
+    && (test -f package-lock.json && npm ci || npm install --no-audit --no-fund)
+COPY web ./web
+ARG VERSION=0.0.0-dev
+RUN cd web && VITE_APP_VERSION="${VERSION}" npm run build
+
+
+FROM --platform=$BUILDPLATFORM golang:1.26.2-bookworm AS go-build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked go mod download
+COPY internal ./internal
+COPY --from=web-build /app/internal/web/dist ./internal/web/dist
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=0.0.0-dev
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+    go build -trimpath -tags=embed -ldflags="-s -w -X chatgpt2api/internal/version.Version=${VERSION}" -o /out/chatgpt2api ./internal
+
+
+FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS app
+WORKDIR /app
+ENV PORT=80
+ENV CHATGPT2API_DEPLOYMENT=docker
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    tzdata \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=go-build /out/chatgpt2api /usr/local/bin/chatgpt2api
+EXPOSE 80
+CMD ["/usr/local/bin/chatgpt2api"]

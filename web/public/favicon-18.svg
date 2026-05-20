@@ -1,0 +1,18 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="4" y="4" width="56" height="56" rx="18" fill="url(#bg)"/>
+  <rect x="5.5" y="5.5" width="53" height="53" rx="16.5" stroke="url(#stroke)" stroke-width="3"/>
+  <text x="12" y="41.5" fill="#7A4300" font-family="Avenir Next, Arial Black, sans-serif" font-size="27" font-weight="900" font-style="italic" letter-spacing="-2">18</text>
+  <path d="M14 18C22 10.8 39.2 11.8 49 20.2" stroke="white" stroke-width="3.2" stroke-linecap="round" opacity=".68"/>
+  <defs>
+    <linearGradient id="bg" x1="10" y1="7" x2="54" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFE7A4"/>
+      <stop offset=".45" stop-color="#FFC247"/>
+      <stop offset="1" stop-color="#F59E0B"/>
+    </linearGradient>
+    <linearGradient id="stroke" x1="10" y1="4" x2="54" y2="60" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF8D8"/>
+      <stop offset=".55" stop-color="#FACC15"/>
+      <stop offset="1" stop-color="#B45309"/>
+    </linearGradient>
+  </defs>
+</svg>

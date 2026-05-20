@@ -1,4 +1,7 @@
 # syntax=docker/dockerfile:1.7
+#
+# Release-only runtime image. GoReleaser builds the chatgpt2api binary first,
+# then uses this Dockerfile to package that binary for DockerHub/GHCR.
 
 FROM debian:bookworm-slim
 

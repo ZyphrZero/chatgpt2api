@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { Suspense, type ReactNode } from "react";
 import {
   Navigate,
   Route,
@@ -76,16 +76,22 @@ export function AnimatedRoutes() {
         transition={prefersReducedMotion ? reducedRouteTransition : routeTransition}
         className="min-w-0"
       >
-        <Routes location={location}>
-          {appRoutes.map((route) => (
-            <Route
-              key={route.path}
-              path={route.path}
-              element={<PermissionRoute requiredPath={route.requiredPath}>{route.element}</PermissionRoute>}
-            />
-          ))}
-        </Routes>
+        <Suspense fallback={<RouteFallback />}>
+          <Routes location={location}>
+            {appRoutes.map((route) => (
+              <Route
+                key={route.path}
+                path={route.path}
+                element={<PermissionRoute requiredPath={route.requiredPath}>{route.element}</PermissionRoute>}
+              />
+            ))}
+          </Routes>
+        </Suspense>
       </motion.div>
     </AnimatePresence>
   );
+}
+
+function RouteFallback() {
+  return <div className="min-h-screen bg-[#f8fbff]" />;
 }

@@ -147,11 +147,11 @@ export function ProxySettingsCard() {
               <Input
                 value={formUrl}
                 onChange={(event) => setFormUrl(event.target.value)}
-                placeholder="http://user:pass@host:port 或 socks5://host:port"
+                placeholder="留空则不使用代理，仅手动填写后生效"
                 className="h-11 rounded-xl border-stone-200 bg-white font-mono text-xs"
               />
               <div className="text-xs text-stone-400">
-                支持 <code className="font-mono">http / https / socks4 / socks5 / socks5h</code>。
+                只有保存完整代理地址后才会启用，支持 <code className="font-mono">http / https / socks5 / socks5h</code>。
               </div>
             </div>
 

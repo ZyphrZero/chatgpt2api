@@ -106,6 +106,36 @@ func TestStoreNormalizesUnsupportedLoginPageImageMode(t *testing.T) {
 	}
 }
 
+func TestStoreUpdateDisablesIncompleteTurnstileSettings(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	unsetTurnstileEnv(t)
+	unsetLinuxDoEnv(t)
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	got, err := store.Update(map[string]any{
+		"turnstile_enabled":  true,
+		"turnstile_site_key": "",
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	assertConfigValue(t, got, "turnstile_enabled", false)
+	if store.TurnstileReady() {
+		t.Fatal("TurnstileReady() = true, want disabled with missing keys")
+	}
+	envData, err := os.ReadFile(filepath.Join(root, ".env"))
+	if err != nil {
+		t.Fatalf("read .env: %v", err)
+	}
+	if !strings.Contains(string(envData), "CHATGPT2API_TURNSTILE_ENABLED=false") {
+		t.Fatalf(".env missing disabled turnstile setting:\n%s", string(envData))
+	}
+}
+
 func TestStoreNormalizesImageTaskTimeoutSeconds(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CHATGPT2API_ROOT", root)
@@ -134,6 +164,12 @@ func TestStoreNormalizesImageTaskTimeoutSeconds(t *testing.T) {
 	if store.ImageTaskTimeoutSeconds() != 3600 {
 		t.Fatalf("ImageTaskTimeoutSeconds() = %d, want 3600", store.ImageTaskTimeoutSeconds())
 	}
+
+	got, err = store.Update(map[string]any{"image_task_timeout_seconds": float64(480)})
+	if err != nil {
+		t.Fatalf("Update() json number error = %v", err)
+	}
+	assertConfigValue(t, got, "image_task_timeout_seconds", 480)
 }
 
 func TestStoreUpdatePersistsLinuxDoSettingsWithoutLeakingSecret(t *testing.T) {
@@ -221,6 +257,62 @@ func TestStoreUpdateRejectsIncompleteLinuxDoSettings(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "Client Secret") {
 		t.Fatalf("Update() error = %v, want missing secret", err)
+	}
+}
+
+func TestStoreUpdatePersistsQQSettingsWithoutLeakingSecret(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CHATGPT2API_ROOT", root)
+	unsetLinuxDoEnv(t)
+	unsetEnv(t, "CHATGPT2API_QQ_ENABLED")
+	unsetEnv(t, "CHATGPT2API_QQ_CLIENT_ID")
+	unsetEnv(t, "CHATGPT2API_QQ_CLIENT_SECRET")
+	unsetEnv(t, "CHATGPT2API_QQ_REDIRECT_URL")
+	unsetEnv(t, "CHATGPT2API_QQ_FRONTEND_REDIRECT_URL")
+
+	store, err := NewStore()
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+
+	got, err := store.Update(map[string]any{
+		"qq_enabled":               true,
+		"qq_client_id":             "qq-app-id",
+		"qq_client_secret":         "qq-secret",
+		"qq_redirect_url":          "https://example.test/auth/qq/oauth/callback",
+		"qq_frontend_redirect_url": "/auth/qq/callback",
+	})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	assertConfigValue(t, got, "qq_enabled", true)
+	assertConfigValue(t, got, "qq_client_id", "qq-app-id")
+	assertConfigValue(t, got, "qq_client_secret_configured", true)
+	assertConfigValue(t, got, "qq_redirect_url", "https://example.test/auth/qq/oauth/callback")
+	assertConfigValue(t, got, "qq_frontend_redirect_url", "/auth/qq/callback")
+	if _, ok := got["qq_client_secret"]; ok {
+		t.Fatalf("Get() leaked qq_client_secret: %#v", got)
+	}
+	if !store.QQOAuth().Ready() {
+		t.Fatalf("QQOAuth() should be ready: %#v", store.QQOAuth())
+	}
+
+	envData, err := os.ReadFile(filepath.Join(root, ".env"))
+	if err != nil {
+		t.Fatalf("read .env: %v", err)
+	}
+	envText := string(envData)
+	for _, want := range []string{
+		"CHATGPT2API_QQ_ENABLED=true",
+		"CHATGPT2API_QQ_CLIENT_ID=qq-app-id",
+		"CHATGPT2API_QQ_CLIENT_SECRET=qq-secret",
+		"CHATGPT2API_QQ_REDIRECT_URL=https://example.test/auth/qq/oauth/callback",
+		"CHATGPT2API_QQ_FRONTEND_REDIRECT_URL=/auth/qq/callback",
+	} {
+		if !strings.Contains(envText, want) {
+			t.Fatalf(".env missing %q in:\n%s", want, envText)
+		}
 	}
 }
 
@@ -315,28 +407,31 @@ func TestStoreUpdateRefreshesEnvFileBackedRuntimeSettings(t *testing.T) {
 	}
 }
 
-func TestStoreKeepsDifferentExternalEnvironmentOverride(t *testing.T) {
+func TestStoreEnvFileValueWinsOverStaleProcessEnvironment(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte(strings.Join([]string{
-		"CHATGPT2API_BASE_URL=https://file.example",
+		"CHATGPT2API_REGISTRATION_ENABLED=false",
 		"",
 	}, "\n")), 0o644); err != nil {
 		t.Fatalf("write .env: %v", err)
 	}
 	t.Setenv("CHATGPT2API_ROOT", root)
-	t.Setenv("CHATGPT2API_BASE_URL", "https://external.example")
+	t.Setenv("CHATGPT2API_REGISTRATION_ENABLED", "true")
 
 	store, err := NewStore()
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
-	got, err := store.Update(map[string]any{"base_url": "https://saved.example"})
+	if store.RegistrationEnabled() {
+		t.Fatal("RegistrationEnabled() used stale process environment instead of .env")
+	}
+	got, err := store.Update(map[string]any{"registration_enabled": false})
 	if err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
-	assertConfigValue(t, got, "base_url", "https://external.example")
-	if gotEnv := os.Getenv("CHATGPT2API_BASE_URL"); gotEnv != "https://external.example" {
-		t.Fatalf("CHATGPT2API_BASE_URL = %q, want external override unchanged", gotEnv)
+	assertConfigValue(t, got, "registration_enabled", false)
+	if gotEnv := os.Getenv("CHATGPT2API_REGISTRATION_ENABLED"); gotEnv != "false" {
+		t.Fatalf("CHATGPT2API_REGISTRATION_ENABLED = %q, want saved false", gotEnv)
 	}
 }
 
@@ -366,8 +461,12 @@ func TestNewStoreDiscoversEnvFromParentDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
-	if store.RootDir != root {
-		t.Fatalf("RootDir = %q, want %q", store.RootDir, root)
+	wantRoot, err := canonicalDir(root)
+	if err != nil {
+		t.Fatalf("canonicalDir() error = %v", err)
+	}
+	if store.RootDir != wantRoot {
+		t.Fatalf("RootDir = %q, want %q", store.RootDir, wantRoot)
 	}
 	if store.BaseURL() != "https://parent.example" {
 		t.Fatalf("BaseURL() = %q", store.BaseURL())
@@ -497,6 +596,17 @@ func unsetLinuxDoEnv(t *testing.T) {
 		"CHATGPT2API_LINUXDO_USERINFO_EMAIL_PATH",
 		"CHATGPT2API_LINUXDO_USERINFO_ID_PATH",
 		"CHATGPT2API_LINUXDO_USERINFO_USERNAME_PATH",
+	} {
+		unsetEnv(t, key)
+	}
+}
+
+func unsetTurnstileEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"CHATGPT2API_TURNSTILE_ENABLED",
+		"CHATGPT2API_TURNSTILE_SITE_KEY",
+		"CHATGPT2API_TURNSTILE_SECRET_KEY",
 	} {
 		unsetEnv(t, key)
 	}

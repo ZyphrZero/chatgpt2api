@@ -49,7 +49,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
   return {
     ...config,
     refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 5),
-    image_concurrent_limit: Number(config.image_concurrent_limit || 4),
+    image_concurrent_limit: Number(config.image_concurrent_limit || 8),
     image_task_timeout_seconds: Number(config.image_task_timeout_seconds || 300),
     user_default_concurrent_limit: Number(config.user_default_concurrent_limit || 0),
     user_default_rpm_limit: Number(config.user_default_rpm_limit || 0),
@@ -61,6 +61,13 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     proxy: typeof config.proxy === "string" ? config.proxy : "",
     base_url: typeof config.base_url === "string" ? config.base_url : "",
     registration_enabled: Boolean(config.registration_enabled),
+    user_free_quota: Math.max(0, Number(config.user_free_quota ?? 10) || 0),
+    invite_reward_quota: Math.max(0, Number(config.invite_reward_quota ?? 0) || 0),
+    invitee_bonus_quota: Math.max(0, Number(config.invitee_bonus_quota ?? 0) || 0),
+    turnstile_enabled: Boolean(config.turnstile_enabled),
+    turnstile_site_key: typeof config.turnstile_site_key === "string" ? config.turnstile_site_key : "",
+    turnstile_secret_key: "",
+    turnstile_secret_configured: Boolean(config.turnstile_secret_configured),
     linuxdo_enabled: Boolean(config.linuxdo_enabled),
     linuxdo_client_id: typeof config.linuxdo_client_id === "string" ? config.linuxdo_client_id : "",
     linuxdo_client_secret: "",
@@ -68,6 +75,24 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     linuxdo_redirect_url: typeof config.linuxdo_redirect_url === "string" ? config.linuxdo_redirect_url : "",
     linuxdo_frontend_redirect_url:
       typeof config.linuxdo_frontend_redirect_url === "string" ? config.linuxdo_frontend_redirect_url : "/auth/linuxdo/callback",
+    qq_enabled: Boolean(config.qq_enabled),
+    qq_client_id: typeof config.qq_client_id === "string" ? config.qq_client_id : "",
+    qq_client_secret: "",
+    qq_client_secret_configured: Boolean(config.qq_client_secret_configured),
+    qq_redirect_url: typeof config.qq_redirect_url === "string" ? config.qq_redirect_url : "",
+    qq_frontend_redirect_url:
+      typeof config.qq_frontend_redirect_url === "string" ? config.qq_frontend_redirect_url : "/auth/qq/callback",
+    social_login_base_url: typeof config.social_login_base_url === "string" ? config.social_login_base_url : "",
+    social_login_app_id: typeof config.social_login_app_id === "string" ? config.social_login_app_id : "",
+    social_login_app_key: "",
+    social_login_app_key_configured: Boolean(config.social_login_app_key_configured),
+    social_login_redirect_url:
+      typeof config.social_login_redirect_url === "string" ? config.social_login_redirect_url : "",
+    social_login_frontend_redirect_url:
+      typeof config.social_login_frontend_redirect_url === "string" ? config.social_login_frontend_redirect_url : "/auth/social/callback",
+    social_login_qq_enabled: Boolean(config.social_login_qq_enabled),
+    social_login_wx_enabled: Boolean(config.social_login_wx_enabled),
+    social_login_douyin_enabled: Boolean(config.social_login_douyin_enabled),
     update_repo: typeof config.update_repo === "string" ? config.update_repo : "ZyphrZero/chatgpt2api",
     update_github_token: "",
     update_github_token_configured: Boolean(config.update_github_token_configured),
@@ -147,11 +172,30 @@ type SettingsStore = {
   setProxy: (value: string) => void;
   setBaseUrl: (value: string) => void;
   setRegistrationEnabled: (value: boolean) => void;
+  setUserFreeQuota: (value: string) => void;
+  setInviteRewardQuota: (value: string) => void;
+  setInviteeBonusQuota: (value: string) => void;
+  setTurnstileEnabled: (value: boolean) => void;
+  setTurnstileSiteKey: (value: string) => void;
+  setTurnstileSecretKey: (value: string) => void;
   setLinuxDoEnabled: (value: boolean) => void;
   setLinuxDoClientId: (value: string) => void;
   setLinuxDoClientSecret: (value: string) => void;
   setLinuxDoRedirectUrl: (value: string) => void;
   setLinuxDoFrontendRedirectUrl: (value: string) => void;
+  setQQEnabled: (value: boolean) => void;
+  setQQClientId: (value: string) => void;
+  setQQClientSecret: (value: string) => void;
+  setQQRedirectUrl: (value: string) => void;
+  setQQFrontendRedirectUrl: (value: string) => void;
+  setSocialLoginBaseUrl: (value: string) => void;
+  setSocialLoginAppId: (value: string) => void;
+  setSocialLoginAppKey: (value: string) => void;
+  setSocialLoginRedirectUrl: (value: string) => void;
+  setSocialLoginFrontendRedirectUrl: (value: string) => void;
+  setSocialLoginQQEnabled: (value: boolean) => void;
+  setSocialLoginWXEnabled: (value: boolean) => void;
+  setSocialLoginDouyinEnabled: (value: boolean) => void;
   setUpdateRepo: (value: string) => void;
   setUpdateGitHubToken: (value: string) => void;
   setLoginPageImageUrl: (value: string) => void;
@@ -262,11 +306,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set({ isSavingConfig: true });
     try {
       const linuxDoClientSecret = String(config.linuxdo_client_secret || "").trim();
+      const qqClientSecret = String(config.qq_client_secret || "").trim();
+      const socialLoginAppKey = String(config.social_login_app_key || "").trim();
       const updateGitHubToken = String(config.update_github_token || "").trim();
+      const turnstileSecretKey = String(config.turnstile_secret_key || "").trim();
       const payload: SettingsConfig = {
         ...config,
         refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
-        image_concurrent_limit: Math.max(1, Number(config.image_concurrent_limit) || 4),
+        image_concurrent_limit: Math.max(1, Number(config.image_concurrent_limit) || 8),
         image_task_timeout_seconds: Math.min(3600, Math.max(30, Number(config.image_task_timeout_seconds) || 300)),
         user_default_concurrent_limit: Math.max(0, Number(config.user_default_concurrent_limit) || 0),
         user_default_rpm_limit: Math.max(0, Number(config.user_default_rpm_limit) || 0),
@@ -277,22 +324,53 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         proxy: config.proxy.trim(),
         base_url: String(config.base_url || "").trim(),
         registration_enabled: Boolean(config.registration_enabled),
+        user_free_quota: Math.max(0, Number(config.user_free_quota) || 0),
+        invite_reward_quota: Math.max(0, Number(config.invite_reward_quota) || 0),
+        invitee_bonus_quota: Math.max(0, Number(config.invitee_bonus_quota) || 0),
+        turnstile_enabled: Boolean(config.turnstile_enabled),
+        turnstile_site_key: String(config.turnstile_site_key || "").trim(),
+        turnstile_secret_key: turnstileSecretKey,
         linuxdo_enabled: Boolean(config.linuxdo_enabled),
         linuxdo_client_id: String(config.linuxdo_client_id || "").trim(),
         linuxdo_client_secret: linuxDoClientSecret,
         linuxdo_redirect_url: String(config.linuxdo_redirect_url || "").trim(),
         linuxdo_frontend_redirect_url: String(config.linuxdo_frontend_redirect_url || "").trim(),
+        qq_enabled: Boolean(config.qq_enabled),
+        qq_client_id: String(config.qq_client_id || "").trim(),
+        qq_client_secret: qqClientSecret,
+        qq_redirect_url: String(config.qq_redirect_url || "").trim(),
+        qq_frontend_redirect_url: String(config.qq_frontend_redirect_url || "").trim(),
+        social_login_base_url: String(config.social_login_base_url || "").trim(),
+        social_login_app_id: String(config.social_login_app_id || "").trim(),
+        social_login_app_key: socialLoginAppKey,
+        social_login_redirect_url: String(config.social_login_redirect_url || "").trim(),
+        social_login_frontend_redirect_url: String(config.social_login_frontend_redirect_url || "").trim(),
+        social_login_qq_enabled: Boolean(config.social_login_qq_enabled),
+        social_login_wx_enabled: Boolean(config.social_login_wx_enabled),
+        social_login_douyin_enabled: Boolean(config.social_login_douyin_enabled),
         update_repo: String(config.update_repo ?? "ZyphrZero/chatgpt2api").trim(),
         update_github_token: updateGitHubToken,
       };
       if (!linuxDoClientSecret) {
         delete payload.linuxdo_client_secret;
       }
+      if (!qqClientSecret) {
+        delete payload.qq_client_secret;
+      }
+      if (!socialLoginAppKey) {
+        delete payload.social_login_app_key;
+      }
       if (!updateGitHubToken) {
         delete payload.update_github_token;
       }
+      if (!turnstileSecretKey) {
+        delete payload.turnstile_secret_key;
+      }
       delete payload.linuxdo_client_secret_configured;
+      delete payload.qq_client_secret_configured;
+      delete payload.social_login_app_key_configured;
       delete payload.update_github_token_configured;
+      delete payload.turnstile_secret_configured;
 
       const data = await updateSettingsConfig(payload);
       set({
@@ -394,6 +472,30 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => state.config ? { config: { ...state.config, registration_enabled: value } } : {});
   },
 
+  setUserFreeQuota: (value) => {
+    set((state) => state.config ? { config: { ...state.config, user_free_quota: value } } : {});
+  },
+
+  setInviteRewardQuota: (value) => {
+    set((state) => state.config ? { config: { ...state.config, invite_reward_quota: value } } : {});
+  },
+
+  setInviteeBonusQuota: (value) => {
+    set((state) => state.config ? { config: { ...state.config, invitee_bonus_quota: value } } : {});
+  },
+
+  setTurnstileEnabled: (value) => {
+    set((state) => state.config ? { config: { ...state.config, turnstile_enabled: value } } : {});
+  },
+
+  setTurnstileSiteKey: (value) => {
+    set((state) => state.config ? { config: { ...state.config, turnstile_site_key: value } } : {});
+  },
+
+  setTurnstileSecretKey: (value) => {
+    set((state) => state.config ? { config: { ...state.config, turnstile_secret_key: value } } : {});
+  },
+
   setLinuxDoEnabled: (value) => {
     set((state) => state.config ? { config: { ...state.config, linuxdo_enabled: value } } : {});
   },
@@ -412,6 +514,58 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setLinuxDoFrontendRedirectUrl: (value) => {
     set((state) => state.config ? { config: { ...state.config, linuxdo_frontend_redirect_url: value } } : {});
+  },
+
+  setQQEnabled: (value) => {
+    set((state) => state.config ? { config: { ...state.config, qq_enabled: value } } : {});
+  },
+
+  setQQClientId: (value) => {
+    set((state) => state.config ? { config: { ...state.config, qq_client_id: value } } : {});
+  },
+
+  setQQClientSecret: (value) => {
+    set((state) => state.config ? { config: { ...state.config, qq_client_secret: value } } : {});
+  },
+
+  setQQRedirectUrl: (value) => {
+    set((state) => state.config ? { config: { ...state.config, qq_redirect_url: value } } : {});
+  },
+
+  setQQFrontendRedirectUrl: (value) => {
+    set((state) => state.config ? { config: { ...state.config, qq_frontend_redirect_url: value } } : {});
+  },
+
+  setSocialLoginBaseUrl: (value) => {
+    set((state) => state.config ? { config: { ...state.config, social_login_base_url: value } } : {});
+  },
+
+  setSocialLoginAppId: (value) => {
+    set((state) => state.config ? { config: { ...state.config, social_login_app_id: value } } : {});
+  },
+
+  setSocialLoginAppKey: (value) => {
+    set((state) => state.config ? { config: { ...state.config, social_login_app_key: value } } : {});
+  },
+
+  setSocialLoginRedirectUrl: (value) => {
+    set((state) => state.config ? { config: { ...state.config, social_login_redirect_url: value } } : {});
+  },
+
+  setSocialLoginFrontendRedirectUrl: (value) => {
+    set((state) => state.config ? { config: { ...state.config, social_login_frontend_redirect_url: value } } : {});
+  },
+
+  setSocialLoginQQEnabled: (value) => {
+    set((state) => state.config ? { config: { ...state.config, social_login_qq_enabled: value } } : {});
+  },
+
+  setSocialLoginWXEnabled: (value) => {
+    set((state) => state.config ? { config: { ...state.config, social_login_wx_enabled: value } } : {});
+  },
+
+  setSocialLoginDouyinEnabled: (value) => {
+    set((state) => state.config ? { config: { ...state.config, social_login_douyin_enabled: value } } : {});
   },
 
   setUpdateRepo: (value) => {
@@ -478,8 +632,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       const nextConfig = normalizeConfig(data.config);
       set({ config: nextConfig });
       dispatchAppMetaUpdated({
-        app_title: "chatgpt2api",
-        project_name: "chatgpt2api",
+        app_title: "1818",
+        project_name: "1818",
         login_page_image_url: String(nextConfig.login_page_image_url || ""),
         login_page_image_mode: normalizeLoginPageImageMode(nextConfig.login_page_image_mode),
         login_page_image_zoom: Number(nextConfig.login_page_image_zoom),
@@ -601,7 +755,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => {
       if (!state.registerConfig) return {};
       const providers = [...(state.registerConfig.mail.providers || [])];
-      providers[index] = { ...(providers[index] || {}), ...updates };
+      providers[index] = { ...providers[index], ...updates };
       return { registerConfig: { ...state.registerConfig, mail: { ...state.registerConfig.mail, providers } } };
     });
   },

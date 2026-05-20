@@ -80,6 +80,29 @@ func TestTextModelDoesNotForceImageChatRoute(t *testing.T) {
 	}
 }
 
+func TestTextChatRequestWithImageUsesVisionWithoutImageRoute(t *testing.T) {
+	body := map[string]any{"model": "gpt-5", "messages": []map[string]any{{
+		"role": "user",
+		"content": []any{
+			map[string]any{"type": "text", "text": "这张图是什么"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("png"))}},
+		},
+	}}}
+	if IsImageChatRequest(body) {
+		t.Fatal("chat messages with images must stay on the text chat route unless image generation is explicitly requested")
+	}
+	request, err := TextChatRequestFromBody(body)
+	if err != nil {
+		t.Fatalf("TextChatRequestFromBody() error = %v", err)
+	}
+	if !request.VisionRequired {
+		t.Fatal("VisionRequired = false, want true")
+	}
+	if _, ok := request.Messages[0]["content"].([]any); !ok {
+		t.Fatalf("content = %#v, want multimodal blocks preserved", request.Messages[0]["content"])
+	}
+}
+
 func TestListModelsUsesInjectedLister(t *testing.T) {
 	called := false
 	engine := &Engine{
@@ -172,6 +195,33 @@ func TestGPTImageModelKeepsQualityHint(t *testing.T) {
 	prompt := BuildImagePrompt(request.Prompt, request.Size, request.Quality)
 	if !strings.Contains(prompt, "画质使用 High 档") {
 		t.Fatalf("gpt image prompt missing quality hint: %s", prompt)
+	}
+}
+
+func TestConversationRequestNormalizesAutoImageModel(t *testing.T) {
+	request := ConversationRequest{
+		Model:   " auto ",
+		Size:    "3840x1648",
+		Quality: "high",
+	}.Normalized()
+	if request.Model != "gpt-image-2" {
+		t.Fatalf("Normalized() model = %q, want gpt-image-2", request.Model)
+	}
+	if request.Quality != "high" {
+		t.Fatalf("Normalized() quality = %q, want high", request.Quality)
+	}
+	if !request.RequirePaidAccount {
+		t.Fatal("Normalized() RequirePaidAccount = false, want true for high resolution")
+	}
+}
+
+func TestConversationRequestKeepsResponsesImageToolAutoModel(t *testing.T) {
+	request := ConversationRequest{
+		Model:              " auto ",
+		ResponsesImageTool: true,
+	}.Normalized()
+	if request.Model != "auto" {
+		t.Fatalf("Normalized() responses image model = %q, want auto", request.Model)
 	}
 }
 
@@ -356,91 +406,32 @@ func TestResponseImageGenerationRequestDefaultsImageModelForAuto(t *testing.T) {
 	if request.Size != "auto" {
 		t.Fatalf("size = %q, want auto", request.Size)
 	}
-}
-
-func TestCodexResponsesImageToolPayloadUsesGPT55ForImageOnlyModel(t *testing.T) {
-	request := ConversationRequest{
-		Model:        "gpt-image-2",
-		Prompt:       "生成 2K 正方形封面",
-		Size:         "2048x2048",
-		Quality:      "high",
-		OutputFormat: "png",
-	}.Normalized()
-	payload := CodexResponsesImageToolPayload(request)
-	if payload["model"] != codexResponsesImageMainModel {
-		t.Fatalf("payload model = %#v, want %s", payload["model"], codexResponsesImageMainModel)
-	}
-	tools := payload["tools"].([]map[string]any)
-	tool := tools[0]
-	if tool["model"] != "gpt-image-2" {
-		t.Fatalf("tool model = %#v, want gpt-image-2", tool["model"])
-	}
-	input := payload["input"].([]map[string]any)
-	content := input[0]["content"].([]map[string]any)
-	text := util.Clean(content[0]["text"])
-	if !strings.HasPrefix(text, responsesImagePromptGuardPrefix+"\n") || !strings.Contains(text, "生成 2K 正方形封面") {
-		t.Fatalf("payload prompt missing guard: %q", text)
+	if !request.AllowCodexFallback {
+		t.Fatal("AllowCodexFallback = false, want true for auto response-image")
 	}
 }
 
-func TestCodexResponsesImageToolPayloadCarriesExactSize(t *testing.T) {
-	request := ConversationRequest{
-		Model:             "gpt-5.5",
-		Prompt:            "生成 4K 正方形封面",
-		Size:              "2880x2880",
-		Quality:           "high",
-		OutputFormat:      "jpeg",
-		OutputCompression: ptrInt(28),
-	}.Normalized()
-	payload := CodexResponsesImageToolPayload(request)
-	tools := payload["tools"].([]map[string]any)
-	if len(tools) != 1 {
-		t.Fatalf("tools = %#v", payload["tools"])
+func TestResponseImageGenerationRequestAutoMediumUsesSingleWorker(t *testing.T) {
+	body := map[string]any{
+		"model": "auto",
+		"input": "画图迪士尼风格街道",
+		"tools": []any{
+			map[string]any{"type": "image_generation", "quality": "medium", "output_format": "webp"},
+		},
+		"n": 1,
 	}
-	tool := tools[0]
-	if tool["size"] != "2880x2880" {
-		t.Fatalf("tool size = %#v, want 2880x2880", tool["size"])
+	request, _, err := ResponseImageGenerationRequest(body, "", nil)
+	if err != nil {
+		t.Fatalf("ResponseImageGenerationRequest() error = %v", err)
 	}
-	if tool["quality"] != "high" {
-		t.Fatalf("tool quality = %#v, want high", tool["quality"])
+	if !isFastImageRequest(request.Normalized()) {
+		t.Fatalf("request should use fast image scheduling: %#v", request.Normalized())
 	}
-	if tool["output_format"] != "jpeg" {
-		t.Fatalf("tool output_format = %#v, want jpeg", tool["output_format"])
+	if timeout := defaultImageStreamAttemptTimeoutForRequest(request.Normalized()); timeout != fastImageStreamAttemptTimeout {
+		t.Fatalf("timeout = %s, want %s", timeout, fastImageStreamAttemptTimeout)
 	}
-	if tool["output_compression"] != 28 {
-		t.Fatalf("tool output_compression = %#v, want 28", tool["output_compression"])
-	}
-	if tool["model"] != nil {
-		t.Fatalf("text-model request should not set image tool model: %#v", tool["model"])
-	}
-	if payload["model"] != "gpt-5.5" {
-		t.Fatalf("payload model = %#v, want gpt-5.5", payload["model"])
-	}
-	instructions, ok := payload["instructions"].(string)
-	if !ok || !strings.Contains(instructions, codexResponsesImageToolBridgeMarker) {
-		t.Fatalf("payload instructions missing image bridge: %#v", payload["instructions"])
-	}
-}
-
-func TestCodexResponsesImageToolPayloadOmitsCodexQuality(t *testing.T) {
-	request := ConversationRequest{
-		Model:        "codex-gpt-image-2",
-		Prompt:       "生成封面",
-		Size:         "3840x2160",
-		Quality:      "high",
-		OutputFormat: "png",
-	}.Normalized()
-	payload := CodexResponsesImageToolPayload(request)
-	tools := payload["tools"].([]map[string]any)
-	tool := tools[0]
-	if tool["model"] != "codex-gpt-image-2" {
-		t.Fatalf("tool model = %#v, want codex-gpt-image-2", tool["model"])
-	}
-	if _, ok := tool["quality"]; ok {
-		t.Fatalf("codex image tool should not include quality: %#v", tool)
-	}
-	if payload["model"] != codexResponsesImageMainModel {
-		t.Fatalf("payload model = %#v, want %s", payload["model"], codexResponsesImageMainModel)
+	if workers := imageStreamWorkerCount(request.Normalized()); workers != 1 {
+		t.Fatalf("worker count = %d, want 1", workers)
 	}
 }
 
@@ -462,6 +453,41 @@ func TestToolCallParsing(t *testing.T) {
 	}
 	if stripped := StripToolMarkup(text); stripped != "先处理" {
 		t.Fatalf("StripToolMarkup() = %q", stripped)
+	}
+}
+
+func TestApplyPatchOpExtractsTextFromValueMap(t *testing.T) {
+	got := ApplyPatchOp(map[string]any{
+		"o": "append",
+		"v": map[string]any{"type": "text", "text": "增量文本"},
+	}, "已有", "")
+	if got != "已有增量文本" {
+		t.Fatalf("ApplyPatchOp() = %q", got)
+	}
+
+	replaced := ApplyPatchOp(map[string]any{
+		"o": "replace",
+		"v": map[string]any{"content": map[string]any{"parts": []any{map[string]any{"v": "正文"}}}},
+	}, "旧", "")
+	if replaced != "正文" {
+		t.Fatalf("ApplyPatchOp replace = %q", replaced)
+	}
+}
+
+func TestAssistantHistoryTextUsesOnlyTextParts(t *testing.T) {
+	messages := []map[string]any{{
+		"role": "assistant",
+		"content": []any{
+			map[string]any{"type": "text", "text": "可见文本"},
+			map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,cG5n"}},
+		},
+	}}
+	if got := AssistantHistoryText(messages); got != "可见文本" {
+		t.Fatalf("AssistantHistoryText() = %q", got)
+	}
+	history := AssistantHistoryMessages(messages)
+	if len(history) != 1 || history[0] != "可见文本" {
+		t.Fatalf("AssistantHistoryMessages() = %#v", history)
 	}
 }
 
@@ -497,6 +523,34 @@ func TestCollectImageOutputsMarksTextResponse(t *testing.T) {
 	}
 	if result["message"] != "text response" {
 		t.Fatalf("message = %#v, want text response", result["message"])
+	}
+}
+
+func TestCollectImageOutputsWithLimitClampsExtraImageResults(t *testing.T) {
+	outputs := make(chan ImageOutput, 2)
+	outputs <- ImageOutput{Kind: "result", Created: 123, Data: []map[string]any{
+		{"url": "https://example.test/1.png"},
+		{"url": "https://example.test/2.png"},
+	}}
+	outputs <- ImageOutput{Kind: "result", Created: 123, Data: []map[string]any{
+		{"url": "https://example.test/3.png"},
+		{"url": "https://example.test/4.png"},
+	}}
+	close(outputs)
+	errCh := make(chan error, 1)
+	errCh <- nil
+	close(errCh)
+
+	result, err := (&Engine{}).CollectImageOutputsWithLimit(outputs, errCh, 3)
+	if err != nil {
+		t.Fatalf("CollectImageOutputsWithLimit() error = %v", err)
+	}
+	data := util.AsMapSlice(result["data"])
+	if len(data) != 3 {
+		t.Fatalf("data length = %d, want 3: %#v", len(data), data)
+	}
+	if data[2]["url"] != "https://example.test/3.png" {
+		t.Fatalf("third result = %#v", data[2])
 	}
 }
 
@@ -545,6 +599,19 @@ func TestHandleImageGenerationsValidatesPromptAndCount(t *testing.T) {
 				t.Fatalf("HTTPError = %#v, want status 400 message %q", httpErr, tc.want)
 			}
 		})
+	}
+}
+
+func TestAllowCodexImageFallbackForAutoModel(t *testing.T) {
+	for _, model := range []string{"", util.ImageModelAuto, util.ImageModelGPT} {
+		if !allowCodexImageFallbackForModel(model) {
+			t.Fatalf("allowCodexImageFallbackForModel(%q) = false, want true", model)
+		}
+	}
+	for _, model := range []string{util.ImageModelCodex, util.ImageModelGPT54, "other"} {
+		if allowCodexImageFallbackForModel(model) {
+			t.Fatalf("allowCodexImageFallbackForModel(%q) = true, want false", model)
+		}
 	}
 }
 

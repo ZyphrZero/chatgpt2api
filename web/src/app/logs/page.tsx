@@ -286,27 +286,27 @@ function LogsContent() {
         </CardHeader>
         <CardContent>
           <form className="grid gap-3 md:grid-cols-2 xl:grid-cols-4" onSubmit={handleSearch}>
-            <Input placeholder="操作人" value={filters.username || ""} onChange={(event) => updateFilter("username", event.target.value)} />
-            <Input placeholder="模块" value={filters.module || ""} onChange={(event) => updateFilter("module", event.target.value)} />
-            <Input placeholder="摘要或接口" value={filters.summary || ""} onChange={(event) => updateFilter("summary", event.target.value)} />
-            <Input placeholder="IP 地址" value={filters.ip_address || ""} onChange={(event) => updateFilter("ip_address", event.target.value)} />
-            <Input placeholder="操作类型" value={filters.operation_type || ""} onChange={(event) => updateFilter("operation_type", event.target.value)} />
+            <Input aria-label="按操作人筛选日志" placeholder="操作人" value={filters.username || ""} onChange={(event) => updateFilter("username", event.target.value)} />
+            <Input aria-label="按模块筛选日志" placeholder="模块" value={filters.module || ""} onChange={(event) => updateFilter("module", event.target.value)} />
+            <Input aria-label="按摘要或接口筛选日志" placeholder="摘要或接口" value={filters.summary || ""} onChange={(event) => updateFilter("summary", event.target.value)} />
+            <Input aria-label="按 IP 地址筛选日志" placeholder="IP 地址" value={filters.ip_address || ""} onChange={(event) => updateFilter("ip_address", event.target.value)} />
+            <Input aria-label="按操作类型筛选日志" placeholder="操作类型" value={filters.operation_type || ""} onChange={(event) => updateFilter("operation_type", event.target.value)} />
             <Select value={filters.method || "all"} onValueChange={(value) => updateFilter("method", value)}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger aria-label="按请求方法筛选日志"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">全部方法</SelectItem>
                 {methodOptions.map((method) => <SelectItem key={method} value={method}>{method}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={filters.status || "all"} onValueChange={(value) => updateFilter("status", value)}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger aria-label="按状态码筛选日志"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">全部状态码</SelectItem>
                 {statusOptions.map((status) => <SelectItem key={status} value={status}>{status}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={filters.log_level || "all"} onValueChange={(value) => updateFilter("log_level", value)}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger aria-label="按日志级别筛选日志"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">全部级别</SelectItem>
                 {logLevelOptions.map((level) => <SelectItem key={level} value={level}>{level}</SelectItem>)}
@@ -395,10 +395,26 @@ function LogsContent() {
           </div>
           <div className="flex items-center justify-end gap-2 border-t border-border px-4 py-3 text-sm text-muted-foreground">
             <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
-            <Button variant="outline" size="icon" className="size-9 rounded-lg" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
+            <Button
+              variant="outline"
+              size="icon"
+              className="size-9 rounded-lg"
+              disabled={safePage <= 1}
+              onClick={() => setPage((value) => Math.max(1, value - 1))}
+              aria-label="上一页日志"
+              title="上一页"
+            >
               <ChevronLeft className="size-4" />
             </Button>
-            <Button variant="outline" size="icon" className="size-9 rounded-lg" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
+            <Button
+              variant="outline"
+              size="icon"
+              className="size-9 rounded-lg"
+              disabled={safePage >= pageCount}
+              onClick={() => setPage((value) => Math.min(pageCount, value + 1))}
+              aria-label="下一页日志"
+              title="下一页"
+            >
               <ChevronRight className="size-4" />
             </Button>
           </div>
@@ -494,9 +510,10 @@ function LogsContent() {
                           setLightboxIndex(index);
                           setLightboxOpen(true);
                         }}
+                        aria-label={`预览日志图片 ${index + 1}`}
                       >
                         <div className="aspect-square overflow-hidden bg-muted">
-                          <img src={url} alt="" className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]" />
+                          <img src={url} alt={`日志图片 ${index + 1}`} className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]" />
                         </div>
                         <div className="truncate border-t border-border px-3 py-2 text-xs text-muted-foreground">{url}</div>
                       </button>

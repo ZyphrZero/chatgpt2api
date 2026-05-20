@@ -154,7 +154,7 @@ func transportForProxyURL(proxyURL *url.URL) *http.Transport {
 
 func baseTransport() *http.Transport {
 	return &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy: nil,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},

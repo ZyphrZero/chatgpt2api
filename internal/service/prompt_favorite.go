@@ -208,7 +208,7 @@ func promptFavoriteID(source, promptID string) string {
 
 func normalizePromptFavoriteSource(source string) string {
 	switch source {
-	case "banana-prompt-quicker", "awesome-gpt-image-2-prompts":
+	case "public-image-gallery", "banana-prompt-quicker", "awesome-gpt-image-2-prompts":
 		return source
 	default:
 		return ""

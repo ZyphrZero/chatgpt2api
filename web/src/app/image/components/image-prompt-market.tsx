@@ -5,10 +5,6 @@ import { ExternalLink, LoaderCircle, RefreshCcw, Search, SlidersHorizontal, Star
 import { toast } from "sonner";
 
 import {
-  AWESOME_GPT_IMAGE_2_PROMPTS_SOURCE_URL,
-  BANANA_PROMPTS_SOURCE_URL,
-  PROMPT_MARKET_SOURCE_OPTIONS,
-  fetchPromptMarketPrompts,
   type BananaPrompt,
   type BananaPromptMode,
   type PromptMarketLanguage,
@@ -29,7 +25,6 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -42,17 +37,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { fetchManagedImages, type ManagedImage } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type PromptMarketModeFilter = "all" | BananaPromptMode;
 type PromptMarketNsfwFilter = "safe" | "include" | "only";
-type PromptMarketSourceFilter = "all" | PromptMarketSourceId;
 type PromptMarketFavoriteFilter = "all" | "favorites";
 
 type ImagePromptMarketProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onApplyPrompt: (prompt: BananaPrompt) => void | Promise<void>;
+  isAdmin?: boolean;
 };
 
 const ALL_CATEGORY_VALUE = "__all__";
@@ -121,7 +117,31 @@ function PromptPreviewImage({ prompt }: { prompt: BananaPrompt }) {
   );
 }
 
-export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePromptMarketProps) {
+function imagePromptFromPublicImage(item: ManagedImage): BananaPrompt | null {
+  const prompt = (item.prompt || "").trim();
+  if (!prompt) {
+    return null;
+  }
+  const title = prompt ? prompt.slice(0, 22) : item.name.replace(/\.[^.]+$/, "") || "公开图库模板";
+  return {
+    id: `public-image-gallery:${item.path}`,
+    title,
+    preview: item.thumbnail_url || item.url,
+    referenceImageUrls: [item.url],
+    prompt,
+    author: item.owner_name || "公开图库",
+    link: item.url,
+    mode: "edit",
+    category: "公开图库",
+    subCategory: item.resolution_preset || item.aspect_ratio || item.orientation || undefined,
+    created: item.published_at || item.created_at,
+    source: "public-image-gallery",
+    sourceLabel: "公开图库",
+    isNsfw: false,
+  };
+}
+
+export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt, isAdmin = false }: ImagePromptMarketProps) {
   const [prompts, setPrompts] = useState<BananaPrompt[]>([]);
   const [favoriteItems, setFavoriteItems] = useState<PromptFavorite[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -130,7 +150,6 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
   const [favoriteError, setFavoriteError] = useState("");
   const [keyword, setKeyword] = useState("");
   const [favoriteFilter, setFavoriteFilter] = useState<PromptMarketFavoriteFilter>("all");
-  const [source, setSource] = useState<PromptMarketSourceFilter>("all");
   const [promptLanguage, setPromptLanguage] = useState<PromptMarketLanguage>("zh-CN");
   const [category, setCategory] = useState(ALL_CATEGORY_VALUE);
   const [mode, setMode] = useState<PromptMarketModeFilter>("all");
@@ -148,12 +167,12 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
     setIsLoading(true);
     setError("");
 
-    void fetchPromptMarketPrompts()
+    void fetchManagedImages({ scope: "public" })
       .then((items) => {
-        setPrompts(items);
+        setPrompts(items.items.map(imagePromptFromPublicImage).filter((item): item is BananaPrompt => Boolean(item)));
       })
       .catch((loadError: unknown) => {
-        setError(loadError instanceof Error ? loadError.message : "读取提示词市场失败");
+        setError(loadError instanceof Error ? loadError.message : "读取公开图库失败");
       })
       .finally(() => {
         setIsLoading(false);
@@ -187,15 +206,15 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
     setError("");
     const controller = new AbortController();
 
-    void fetchPromptMarketPrompts(controller.signal)
+    void fetchManagedImages({ scope: "public" }, { signal: controller.signal })
       .then((items) => {
-        setPrompts(items);
+        setPrompts(items.items.map(imagePromptFromPublicImage).filter((item): item is BananaPrompt => Boolean(item)));
       })
       .catch((loadError: unknown) => {
         if (controller.signal.aborted) {
           return;
         }
-        setError(loadError instanceof Error ? loadError.message : "读取提示词市场失败");
+        setError(loadError instanceof Error ? loadError.message : "读取公开图库失败");
       })
       .finally(() => {
         if (!controller.signal.aborted) {
@@ -239,7 +258,13 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
   useEffect(() => {
     setVisibleCount(INITIAL_VISIBLE_COUNT);
     scrollAreaRef.current?.scrollTo({ top: 0 });
-  }, [keyword, source, promptLanguage, category, mode, nsfwFilter, favoriteFilter]);
+  }, [keyword, promptLanguage, category, mode, nsfwFilter, favoriteFilter]);
+
+  useEffect(() => {
+    if (!isAdmin && nsfwFilter !== "safe") {
+      setNsfwFilter("safe");
+    }
+  }, [isAdmin, nsfwFilter]);
 
   useEffect(() => {
     if (open) {
@@ -266,20 +291,13 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
 
   const promptPool = favoriteFilter === "favorites" ? favoritePrompts : prompts;
 
-  const sourceFilteredPrompts = useMemo(() => {
-    if (source === "all") {
-      return promptPool;
-    }
-    return promptPool.filter((prompt) => prompt.source === source);
-  }, [promptPool, source]);
-
   const categories = useMemo(() => {
     const values = new Set<string>();
-    sourceFilteredPrompts.forEach((prompt) => {
+    promptPool.forEach((prompt) => {
       values.add(getLocalizedPrompt(prompt, promptLanguage).category);
     });
     return [...values].sort((a, b) => a.localeCompare(b, "zh-CN"));
-  }, [promptLanguage, sourceFilteredPrompts]);
+  }, [promptLanguage, promptPool]);
 
   useEffect(() => {
     if (category !== ALL_CATEGORY_VALUE && !categories.includes(category)) {
@@ -290,7 +308,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
   const filteredPrompts = useMemo(() => {
     const normalizedKeyword = keyword.trim().toLowerCase();
 
-    return sourceFilteredPrompts.filter((prompt) => {
+    return promptPool.filter((prompt) => {
       const localizedPrompt = getLocalizedPrompt(prompt, promptLanguage);
       if (nsfwFilter === "safe" && prompt.isNsfw) {
         return false;
@@ -317,12 +335,10 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
         includesKeyword(localizedPrompt.sourceLabel, normalizedKeyword)
       );
     });
-  }, [category, keyword, mode, nsfwFilter, promptLanguage, sourceFilteredPrompts]);
+  }, [category, keyword, mode, nsfwFilter, promptLanguage, promptPool]);
 
   const visiblePrompts = filteredPrompts.slice(0, visibleCount);
   const hasMore = visiblePrompts.length < filteredPrompts.length;
-  const selectedSourceLabel =
-    source === "all" ? "" : PROMPT_MARKET_SOURCE_OPTIONS.find((item) => item.value === source)?.label || source;
   const selectedLanguageLabel = promptLanguage === "zh-CN" ? "" : "English";
   const selectedCategoryLabel = category === ALL_CATEGORY_VALUE ? "" : category;
   const selectedModeLabel = mode === "all" ? "" : mode === "edit" ? "编辑" : "文生图";
@@ -331,7 +347,6 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
   const selectedFavoriteLabel = favoriteFilter === "favorites" ? "已收藏" : "";
   const activeFilterLabels = [
     selectedFavoriteLabel,
-    selectedSourceLabel,
     selectedLanguageLabel,
     selectedCategoryLabel,
     selectedModeLabel,
@@ -341,7 +356,6 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
 
   const resetFilters = () => {
     setFavoriteFilter("all");
-    setSource("all");
     setPromptLanguage("zh-CN");
     setCategory(ALL_CATEGORY_VALUE);
     setMode("all");
@@ -414,28 +428,10 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
   const renderFilterControls = (triggerClassName?: string) => (
     <>
       <Select
-        value={source}
-        onValueChange={(value) => setSource(value as PromptMarketSourceFilter)}
-      >
-        <SelectTrigger className={triggerClassName}>
-          <SelectValue placeholder="来源" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectGroup>
-            <SelectItem value="all">全部</SelectItem>
-            {PROMPT_MARKET_SOURCE_OPTIONS.map((item) => (
-              <SelectItem key={item.value} value={item.value}>
-                {item.label}
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        </SelectContent>
-      </Select>
-      <Select
         value={promptLanguage}
         onValueChange={(value) => setPromptLanguage(value as PromptMarketLanguage)}
       >
-        <SelectTrigger className={triggerClassName}>
+        <SelectTrigger className={triggerClassName} aria-label="筛选提示词语言">
           <SelectValue placeholder="语言" />
         </SelectTrigger>
         <SelectContent>
@@ -446,7 +442,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
         </SelectContent>
       </Select>
       <Select value={category} onValueChange={setCategory}>
-        <SelectTrigger className={triggerClassName}>
+        <SelectTrigger className={triggerClassName} aria-label="筛选提示词分类">
           <SelectValue placeholder="分类" />
         </SelectTrigger>
         <SelectContent>
@@ -461,7 +457,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
         </SelectContent>
       </Select>
       <Select value={mode} onValueChange={(value) => setMode(value as PromptMarketModeFilter)}>
-        <SelectTrigger className={triggerClassName}>
+        <SelectTrigger className={triggerClassName} aria-label="筛选提示词模式">
           <SelectValue placeholder="模式" />
         </SelectTrigger>
         <SelectContent>
@@ -472,21 +468,23 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
           </SelectGroup>
         </SelectContent>
       </Select>
-      <Select
-        value={nsfwFilter}
-        onValueChange={(value) => setNsfwFilter(value as PromptMarketNsfwFilter)}
-      >
-        <SelectTrigger className={triggerClassName}>
-          <SelectValue placeholder="NSFW" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectGroup>
-            <SelectItem value="safe">隐藏 NSFW</SelectItem>
-            <SelectItem value="include">包含 NSFW</SelectItem>
-            <SelectItem value="only">仅 NSFW</SelectItem>
-          </SelectGroup>
-        </SelectContent>
-      </Select>
+      {isAdmin ? (
+        <Select
+          value={nsfwFilter}
+          onValueChange={(value) => setNsfwFilter(value as PromptMarketNsfwFilter)}
+        >
+          <SelectTrigger className={triggerClassName} aria-label="筛选 NSFW 提示词">
+            <SelectValue placeholder="NSFW" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value="safe">隐藏 NSFW</SelectItem>
+              <SelectItem value="include">包含 NSFW</SelectItem>
+              <SelectItem value="only">仅 NSFW</SelectItem>
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+      ) : null}
     </>
   );
 
@@ -497,27 +495,6 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <DialogTitle className="text-xl leading-tight sm:text-2xl">Prompts 提示词市场</DialogTitle>
-              <DialogDescription className="mt-2 hidden leading-6 sm:block">
-                来自{" "}
-                <a
-                  href={BANANA_PROMPTS_SOURCE_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="font-medium text-[#1456f0] hover:underline"
-                >
-                  glidea/banana-prompt-quicker
-                </a>
-                {" "}和{" "}
-                <a
-                  href={AWESOME_GPT_IMAGE_2_PROMPTS_SOURCE_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="font-medium text-[#1456f0] hover:underline"
-                >
-                  EvoLinkAI/awesome-gpt-image-2-prompts
-                </a>
-                ，可按来源筛选并一键套用到当前生图输入框。
-              </DialogDescription>
             </div>
             <div className="flex shrink-0 items-center gap-2 pt-0.5 text-xs text-[#8e8e93]">
               <span className="rounded-full bg-[#f0f0f0] px-2.5 py-1 sm:px-3">
@@ -526,14 +503,14 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                     ? "读取收藏"
                     : `已收藏 ${filteredPrompts.length}`
                   : prompts.length > 0
-                    ? `${filteredPrompts.length} / ${sourceFilteredPrompts.length}`
-                    : "远程市场"}
+                    ? `${filteredPrompts.length} / ${prompts.length}`
+                    : "公开图库"}
               </span>
             </div>
           </div>
         </DialogHeader>
 
-        <div className="border-b border-[#f2f3f5] px-4 py-2.5 sm:px-6 sm:py-3">
+        <div className="border-b border-[#f2f3f5] px-4 py-2 sm:px-6 sm:py-2.5">
           <div className="md:hidden">
             {renderFavoriteTabs()}
             <div className="mt-2 flex items-center gap-2">
@@ -544,6 +521,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                   onChange={(event) => setKeyword(event.target.value)}
                   placeholder="搜索提示词"
                   className="h-10 pl-9"
+                  aria-label="搜索提示词"
                 />
               </div>
               <button
@@ -602,7 +580,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
             ) : null}
           </div>
 
-          <div className="hidden md:flex md:flex-col md:gap-2">
+          <div className="hidden md:flex md:flex-col md:gap-1.5">
             <div className="flex min-w-0 gap-2">
               <div className="relative min-w-0 flex-1">
                 <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-[#8e8e93]" />
@@ -611,11 +589,12 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                   onChange={(event) => setKeyword(event.target.value)}
                   placeholder="搜索标题、作者、分类或提示词"
                   className="pl-9"
+                  aria-label="搜索标题、作者、分类或提示词"
                 />
               </div>
               {renderFavoriteTabs("w-[168px] shrink-0")}
             </div>
-            <div className="grid gap-2 md:grid-cols-[minmax(180px,1fr)_120px_minmax(160px,1fr)_130px_140px]">
+            <div className={cn("grid gap-2", isAdmin ? "md:grid-cols-[minmax(180px,1fr)_120px_minmax(160px,1fr)_140px]" : "md:grid-cols-[minmax(180px,1fr)_120px_minmax(160px,1fr)]")}>
               {renderFilterControls("min-w-0")}
             </div>
           </div>
@@ -629,11 +608,11 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
           ) : null}
         </div>
 
-        <div ref={scrollAreaRef} className="min-h-0 flex-1 overflow-y-auto bg-white px-4 py-3 sm:px-6 sm:py-4">
+        <div ref={scrollAreaRef} className="min-h-0 flex-1 overflow-y-auto bg-white px-4 py-2.5 sm:px-6 sm:py-3">
           {favoriteFilter !== "favorites" && isLoading ? (
             <div className="flex h-full min-h-[320px] flex-col items-center justify-center gap-3 text-[#45515e]">
               <LoaderCircle className="size-6 animate-spin text-[#1456f0]" />
-              <p className="text-sm">正在读取远程提示词市场...</p>
+              <p className="text-sm">正在读取公开图库...</p>
             </div>
           ) : favoriteFilter !== "favorites" && error ? (
             <div className="flex h-full min-h-[320px] flex-col items-center justify-center gap-4 text-center">
@@ -662,8 +641,8 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                 : "没有找到匹配的提示词"}
             </div>
           ) : (
-            <div className="flex flex-col gap-4">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="flex flex-col gap-3.5">
+              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
                 {visiblePrompts.map((prompt) => {
                   const localizedPrompt = getLocalizedPrompt(prompt, promptLanguage);
                   const dateLabel = formatPromptDate(prompt.created);
@@ -676,7 +655,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                   return (
                     <article
                       key={prompt.id}
-                      className="group overflow-hidden rounded-[22px] border border-[#f2f3f5] bg-white shadow-[0_4px_6px_rgba(0,0,0,0.08)] transition hover:-translate-y-0.5 hover:shadow-[0_12px_16px_-4px_rgba(36,36,36,0.08)]"
+                    className="group overflow-hidden rounded-[20px] border border-[#f2f3f5] bg-white shadow-[0_4px_6px_rgba(0,0,0,0.08)] transition hover:-translate-y-0.5 hover:shadow-[0_12px_16px_-4px_rgba(36,36,36,0.08)]"
                     >
                       <div className="relative aspect-[16/10] overflow-hidden bg-[#f0f0f0]">
                         <PromptPreviewImage prompt={localizedPrompt} />
@@ -690,33 +669,33 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                             </span>
                           </div>
                         ) : null}
-                        <div className="absolute inset-x-0 bottom-0 flex flex-wrap items-center gap-1.5 bg-gradient-to-t from-black/70 via-black/25 to-transparent px-3 pt-8 pb-2">
-                          <Badge className="bg-white/92 text-[#18181b] shadow-sm">
+                        <div className="absolute inset-x-0 bottom-0 flex flex-wrap items-center gap-1 bg-gradient-to-t from-black/70 via-black/25 to-transparent px-2.5 pt-7 pb-2">
+                          <Badge className="bg-white/92 px-1.5 py-0.5 text-[10px] text-[#18181b] shadow-sm">
                             {localizedPrompt.mode === "edit" ? "编辑" : "文生图"}
                           </Badge>
-                          <Badge className="bg-white/18 text-white shadow-sm backdrop-blur">
+                          <Badge className="bg-white/18 px-1.5 py-0.5 text-[10px] text-white shadow-sm backdrop-blur">
                             {localizedPrompt.category}
                           </Badge>
                           {prompt.isNsfw ? (
-                            <Badge className="bg-white/18 text-white shadow-sm backdrop-blur">
+                            <Badge className="bg-white/18 px-1.5 py-0.5 text-[10px] text-white shadow-sm backdrop-blur">
                               NSFW
                             </Badge>
                           ) : null}
                           {prompt.referenceImageUrls.length > 0 ? (
-                            <Badge className="bg-white/18 text-white shadow-sm backdrop-blur">
+                            <Badge className="bg-white/18 px-1.5 py-0.5 text-[10px] text-white shadow-sm backdrop-blur">
                               {prompt.referenceImageUrls.length} 张参考图
                             </Badge>
                           ) : null}
                         </div>
                       </div>
-                      <div className="flex min-h-[196px] flex-col gap-3 p-4">
+                      <div className="flex min-h-[182px] flex-col gap-2.5 p-3.5">
                         <div className="flex min-w-0 items-start justify-between gap-3">
                           <div className="min-w-0">
-                            <h3 className="font-display truncate text-base font-semibold text-[#222222]">
+                            <h3 className="font-display truncate text-[15px] font-semibold text-[#222222]">
                               {localizedPrompt.title}
                             </h3>
                             {promptMetaLabels.length > 0 ? (
-                              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-[#8e8e93]">
+                              <div className="mt-0.5 flex flex-wrap items-center gap-1 text-[10px] text-[#8e8e93]">
                                 {promptMetaLabels.map((label) => (
                                   <span key={label}>/{label}</span>
                                 ))}
@@ -745,7 +724,7 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                               <a
                                 href={prompt.link}
                                 target="_blank"
-                                rel="noreferrer"
+                                rel="noopener noreferrer"
                                 className="inline-flex size-8 items-center justify-center rounded-full border border-[#e5e7eb] text-[#45515e] transition hover:bg-black/[0.05] hover:text-[#18181b]"
                                 aria-label="查看来源"
                                 title="查看来源"
@@ -755,12 +734,12 @@ export function ImagePromptMarket({ open, onOpenChange, onApplyPrompt }: ImagePr
                             ) : null}
                           </div>
                         </div>
-                        <p className="line-clamp-4 text-sm leading-6 text-[#45515e]">{localizedPrompt.prompt}</p>
-                        <div className="mt-auto flex justify-end border-t border-[#f2f3f5] pt-3">
+                        <p className="line-clamp-3 text-[13px] leading-5 text-[#45515e]">{localizedPrompt.prompt}</p>
+                        <div className="mt-auto flex justify-end border-t border-[#f2f3f5] pt-2.5">
                           <Button
                             type="button"
                             size="sm"
-                            className="h-8 rounded-full bg-[#1456f0] px-4 text-xs text-white shadow-sm hover:bg-[#2563eb]"
+                            className="h-7 rounded-full bg-[#1456f0] px-3.5 text-[11px] text-white shadow-sm hover:bg-[#2563eb]"
                             onClick={() => void onApplyPrompt(localizedPrompt)}
                           >
                             套用

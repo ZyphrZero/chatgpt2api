@@ -1,0 +1,716 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>1818 小程序对话式生成页 UI</title>
+    <style>
+      :root {
+        --bg: #f6f8fc;
+        --card: #fbfdff;
+        --text: #222222;
+        --muted: #45515e;
+        --tertiary: #8e8e93;
+        --border: #dfe7f1;
+        --soft: #edf2f8;
+        --brand: #1456f0;
+        --brand-soft: #e8f2ff;
+        --shadow-card: 0 8px 24px rgba(24, 40, 72, 0.07);
+        --shadow-ambient: 0 18px 54px rgba(44, 74, 116, 0.09);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at 18% 10%, rgba(20, 86, 240, 0.08), transparent 28%),
+          linear-gradient(180deg, #f8fbff 0%, var(--bg) 46%, #f2f6fb 100%);
+        color: var(--text);
+        font-family:
+          "DM Sans", "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB",
+          "Microsoft YaHei", sans-serif;
+      }
+
+      .board {
+        display: grid;
+        grid-template-columns: minmax(320px, 390px) minmax(360px, 520px);
+        gap: 42px;
+        align-items: center;
+        width: min(100%, 1080px);
+        min-height: 100vh;
+        margin: 0 auto;
+        padding: 48px 28px;
+      }
+
+      .phone {
+        width: 390px;
+        height: 844px;
+        overflow: hidden;
+        border: 10px solid #10151d;
+        border-radius: 46px;
+        background: var(--bg);
+        box-shadow:
+          0 36px 90px rgba(17, 24, 39, 0.28),
+          inset 0 0 0 1px rgba(255, 255, 255, 0.26);
+      }
+
+      .screen {
+        position: relative;
+        height: 100%;
+        overflow: hidden;
+        background:
+          linear-gradient(180deg, #f8fbff 0%, #f6f8fc 48%, #eef4fb 100%);
+      }
+
+      .wx-nav {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 56px;
+        padding: 0 16px;
+        color: #111827;
+        font-size: 16px;
+        font-weight: 800;
+      }
+
+      .wx-capsule {
+        position: absolute;
+        top: 13px;
+        right: 14px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        height: 30px;
+        border: 1px solid rgba(17, 24, 39, 0.16);
+        border-radius: 999px;
+        padding: 0 10px;
+        background: rgba(255, 255, 255, 0.72);
+      }
+
+      .wx-dot {
+        width: 4px;
+        height: 4px;
+        border-radius: 999px;
+        background: #111827;
+        box-shadow: 7px 0 0 #111827, 14px 0 0 #111827;
+      }
+
+      .wx-ring {
+        width: 15px;
+        height: 15px;
+        border: 2px solid #111827;
+        border-radius: 999px;
+      }
+
+      .page {
+        height: calc(100% - 56px);
+        overflow: hidden;
+        padding: 0 14px 92px;
+      }
+
+      .page-head {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 14px;
+        margin: 4px 0 12px;
+      }
+
+      .eyebrow {
+        color: var(--brand);
+        font-size: 11px;
+        font-weight: 900;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 2px 0 0;
+        color: #0b1020;
+        font-size: 28px;
+        line-height: 1;
+        font-weight: 900;
+        letter-spacing: -0.06em;
+      }
+
+      .history-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        height: 32px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 0 10px;
+        background: rgba(255, 255, 255, 0.86);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 800;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
+      }
+
+      .notice {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        min-height: 42px;
+        border: 1px solid #cfe0ff;
+        border-radius: 16px;
+        padding: 9px 11px;
+        background: #f4f8ff;
+        color: #17437d;
+        font-size: 12px;
+        font-weight: 700;
+        box-shadow: var(--shadow-card);
+      }
+
+      .notice-icon {
+        display: grid;
+        width: 24px;
+        height: 24px;
+        flex: 0 0 auto;
+        place-items: center;
+        border-radius: 9px;
+        background: var(--brand);
+        color: #fff;
+        font-size: 13px;
+      }
+
+      .chat {
+        display: flex;
+        height: 514px;
+        flex-direction: column;
+        gap: 12px;
+        overflow: hidden;
+        padding: 14px 1px 10px;
+      }
+
+      .row {
+        display: flex;
+        gap: 8px;
+      }
+
+      .row.user {
+        justify-content: flex-end;
+      }
+
+      .avatar {
+        display: grid;
+        width: 28px;
+        height: 28px;
+        flex: 0 0 auto;
+        place-items: center;
+        border-radius: 11px;
+        background: #181e25;
+        color: #fff;
+        font-size: 13px;
+        font-weight: 900;
+        box-shadow: 0 8px 18px rgba(24, 30, 37, 0.16);
+      }
+
+      .bubble {
+        max-width: 292px;
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 10px 12px;
+        background: rgba(255, 255, 255, 0.86);
+        color: #222;
+        font-size: 13px;
+        line-height: 1.58;
+        box-shadow: var(--shadow-card);
+      }
+
+      .row.user .bubble {
+        border-color: #c8d9ff;
+        background: var(--brand);
+        color: #fff;
+        box-shadow: 0 14px 26px rgba(20, 86, 240, 0.18);
+      }
+
+      .turn-meta {
+        margin-bottom: 7px;
+        color: var(--tertiary);
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      .row.user .turn-meta {
+        color: rgba(255, 255, 255, 0.68);
+      }
+
+      .result-card {
+        overflow: hidden;
+        width: 238px;
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        background: #fff;
+        box-shadow: var(--shadow-card);
+      }
+
+      .result-image {
+        position: relative;
+        height: 300px;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 50% 22%, rgba(255, 255, 255, 0.8), transparent 18%),
+          linear-gradient(150deg, #d9e7ff 0%, #f3e7ed 48%, #b9d6ef 100%);
+      }
+
+      .result-image::before {
+        content: "";
+        position: absolute;
+        inset: 36px 58px 54px;
+        border-radius: 999px 999px 26px 26px;
+        background:
+          radial-gradient(circle at 50% 16%, #f5efe6 0 24%, transparent 25%),
+          linear-gradient(180deg, #3a4a68 0 28%, #f7f1e8 28% 46%, #9bb6d8 46% 100%);
+        box-shadow: 0 24px 42px rgba(47, 60, 96, 0.22);
+      }
+
+      .result-image::after {
+        content: "";
+        position: absolute;
+        right: 20px;
+        bottom: 18px;
+        width: 90px;
+        height: 38px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.45);
+        filter: blur(7px);
+      }
+
+      .result-body {
+        display: grid;
+        gap: 8px;
+        padding: 10px;
+      }
+
+      .image-meta {
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+      }
+
+      .actions {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 6px;
+      }
+
+      .actions span {
+        display: grid;
+        min-height: 28px;
+        place-items: center;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: #fff;
+        color: #334155;
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      .prompt-card {
+        max-height: 82px;
+        overflow: hidden;
+        border: 1px solid #e7edf6;
+        border-radius: 14px;
+        padding: 8px 10px;
+        background: #f8fbff;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.55;
+      }
+
+      .prompt-card strong {
+        display: block;
+        margin-bottom: 3px;
+        color: #1f2937;
+        font-size: 10px;
+      }
+
+      .composer {
+        position: absolute;
+        right: 12px;
+        bottom: 14px;
+        left: 12px;
+        border: 1px solid #dfe7f2;
+        border-radius: 24px;
+        background: rgba(255, 252, 255, 0.98);
+        box-shadow:
+          0 18px 58px -38px rgba(15, 23, 42, 0.5),
+          0 8px 24px rgba(24, 40, 72, 0.07);
+        backdrop-filter: blur(18px);
+      }
+
+      .attachments {
+        display: flex;
+        gap: 7px;
+        padding: 10px 12px 0;
+      }
+
+      .thumb {
+        position: relative;
+        width: 48px;
+        height: 48px;
+        overflow: hidden;
+        border: 1px solid #dbe4f0;
+        border-radius: 14px;
+        background: linear-gradient(135deg, #dbeafe, #fce7f3);
+      }
+
+      .thumb::after {
+        content: "×";
+        position: absolute;
+        top: -5px;
+        right: -5px;
+        display: grid;
+        width: 18px;
+        height: 18px;
+        place-items: center;
+        border: 1px solid #dbe4f0;
+        border-radius: 999px;
+        background: #fff;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 900;
+      }
+
+      .input {
+        min-height: 70px;
+        padding: 10px 12px 4px;
+        color: #222;
+        font-size: 14px;
+        line-height: 1.55;
+      }
+
+      .placeholder {
+        color: #9aa5b5;
+      }
+
+      .composer-tools {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 6px 8px 8px;
+      }
+
+      .plus {
+        display: grid;
+        width: 34px;
+        height: 34px;
+        flex: 0 0 auto;
+        place-items: center;
+        border: 1px solid var(--border);
+        border-radius: 13px;
+        background: #fff;
+        color: #45515e;
+        font-size: 20px;
+        font-weight: 500;
+      }
+
+      .chips {
+        display: flex;
+        min-width: 0;
+        flex: 1;
+        gap: 5px;
+        overflow: hidden;
+      }
+
+      .chip {
+        display: inline-flex;
+        height: 28px;
+        flex: 0 0 auto;
+        align-items: center;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 0 8px;
+        background: #fff;
+        color: #334155;
+        font-size: 10px;
+        font-weight: 850;
+        white-space: nowrap;
+      }
+
+      .chip.primary {
+        border-color: #bfdbfe;
+        background: var(--brand-soft);
+        color: var(--brand);
+      }
+
+      .send {
+        display: grid;
+        width: 34px;
+        height: 34px;
+        flex: 0 0 auto;
+        place-items: center;
+        border-radius: 14px;
+        background: var(--brand);
+        color: #fff;
+        font-size: 18px;
+        font-weight: 900;
+        box-shadow: 0 10px 22px rgba(20, 86, 240, 0.22);
+      }
+
+      .tabbar {
+        position: absolute;
+        right: 0;
+        bottom: 0;
+        left: 0;
+        display: grid;
+        height: 72px;
+        grid-template-columns: repeat(4, 1fr);
+        align-items: end;
+        border-top: 1px solid rgba(223, 231, 241, 0.92);
+        padding: 8px 12px 10px;
+        background: rgba(251, 253, 255, 0.92);
+        backdrop-filter: blur(18px);
+      }
+
+      .tab {
+        display: grid;
+        gap: 4px;
+        justify-items: center;
+        color: #8e8e93;
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      .tab i {
+        display: block;
+        width: 23px;
+        height: 23px;
+        border: 1.8px solid currentColor;
+        border-radius: 9px;
+      }
+
+      .tab.active {
+        color: var(--brand);
+      }
+
+      .notes {
+        display: grid;
+        gap: 18px;
+      }
+
+      .notes h2 {
+        margin: 0;
+        color: #0b1020;
+        font-size: 38px;
+        line-height: 1;
+        font-weight: 950;
+        letter-spacing: -0.07em;
+      }
+
+      .notes p {
+        margin: 0;
+        max-width: 480px;
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.8;
+      }
+
+      .spec-card {
+        display: grid;
+        gap: 12px;
+        border: 1px solid rgba(223, 231, 241, 0.9);
+        border-radius: 24px;
+        padding: 18px;
+        background: rgba(255, 255, 255, 0.76);
+        box-shadow: var(--shadow-ambient);
+        backdrop-filter: blur(18px);
+      }
+
+      .spec-title {
+        color: #0b1020;
+        font-size: 15px;
+        font-weight: 900;
+      }
+
+      .spec-list {
+        display: grid;
+        gap: 8px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .spec-list li {
+        display: grid;
+        grid-template-columns: 8px 1fr;
+        gap: 9px;
+      }
+
+      .spec-list li::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        margin-top: 8px;
+        border-radius: 999px;
+        background: var(--brand);
+      }
+
+      .palette {
+        display: flex;
+        gap: 8px;
+      }
+
+      .swatch {
+        width: 46px;
+        height: 30px;
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        border-radius: 11px;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+      }
+
+      @media (max-width: 920px) {
+        .board {
+          grid-template-columns: 1fr;
+          justify-items: center;
+          padding: 28px 18px;
+        }
+
+        .phone {
+          width: min(390px, calc(100vw - 36px));
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="board">
+      <section class="phone" aria-label="1818 小程序对话式生成页">
+        <div class="screen">
+          <div class="wx-nav">
+            1818 AI 图片创作
+            <div class="wx-capsule" aria-hidden="true">
+              <span class="wx-dot"></span>
+              <span class="wx-ring"></span>
+            </div>
+          </div>
+
+          <div class="page">
+            <header class="page-head">
+              <div>
+                <div class="eyebrow">Image</div>
+                <h1>图片生成</h1>
+              </div>
+              <button class="history-btn">↺ 历史</button>
+            </header>
+
+            <div class="notice">
+              <span class="notice-icon">i</span>
+              <span>手机端图库升级：完整提示词可滚动查看</span>
+            </div>
+
+            <section class="chat" aria-label="对话生成消息流">
+              <div class="row">
+                <div class="avatar">AI</div>
+                <div class="bubble">
+                  <div class="turn-meta">创作助手</div>
+                  直接描述你想要的画面，也可以先上传参考图。我会保持主体、构图和关键风格，再生成可入库的图片。
+                </div>
+              </div>
+
+              <div class="row user">
+                <div class="bubble">
+                  <div class="turn-meta">我</div>
+                  做一张小红书封面，国风人物，保留参考图里的侧脸轮廓和安静氛围。
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="avatar">AI</div>
+                <div class="bubble">
+                  <div class="turn-meta">已理解</div>
+                  将保留主体轮廓与侧脸方向，生成 3:4 竖图，画面偏商业海报质感。
+                </div>
+              </div>
+
+              <div class="row">
+                <div class="avatar">AI</div>
+                <article class="result-card">
+                  <div class="result-image"></div>
+                  <div class="result-body">
+                    <div class="image-meta">IMAGE WEBP · 1024 x 1536 · 1.57MP</div>
+                    <div class="actions">
+                      <span>下载</span>
+                      <span>分享</span>
+                      <span>相似</span>
+                      <span>2K</span>
+                    </div>
+                    <div class="prompt-card">
+                      <strong>本次提示词 · 可滚动查看</strong>
+                      国风人物海报，小红书封面，保留参考图侧脸轮廓，柔和光影，商业摄影级质感，干净背景...
+                    </div>
+                  </div>
+                </article>
+              </div>
+            </section>
+          </div>
+
+          <section class="composer" aria-label="底部对话输入框">
+            <div class="attachments">
+              <div class="thumb" aria-label="参考图缩略图"></div>
+            </div>
+            <div class="input">
+              <span class="placeholder">输入生成要求或继续修改...</span>
+            </div>
+            <div class="composer-tools">
+              <div class="plus">+</div>
+              <div class="chips">
+                <span class="chip primary">GPT Image</span>
+                <span class="chip">3:4</span>
+                <span class="chip">高清</span>
+                <span class="chip">公开</span>
+              </div>
+              <div class="send">↑</div>
+            </div>
+          </section>
+
+          <nav class="tabbar" aria-label="小程序底部导航">
+            <div class="tab"><i></i><span>首页</span></div>
+            <div class="tab active"><i></i><span>生成</span></div>
+            <div class="tab"><i></i><span>图库</span></div>
+            <div class="tab"><i></i><span>我的</span></div>
+          </nav>
+        </div>
+      </section>
+
+      <aside class="notes">
+        <div>
+          <div class="eyebrow">Mini App UI Direction</div>
+          <h2>对话式生成页，不做营销首页</h2>
+        </div>
+        <p>
+          这版把小程序生成页固定为“消息流 + 底部 composer”的工具工作台结构，避免表单感和概念图。颜色、阴影、圆角、卡片层级都沿用网站移动端风格。
+        </p>
+
+        <section class="spec-card">
+          <div class="spec-title">关键结构</div>
+          <ul class="spec-list">
+            <li>顶部保持微信小程序导航栏，内容区使用网站 PageHeader 的 Image / 图片生成结构。</li>
+            <li>中间消息流支持 AI 引导、用户生成请求、AI 理解反馈和结果卡片。</li>
+            <li>底部 composer 固定，包含参考图缩略图、输入框、参数 chips、上传按钮和生成按钮。</li>
+            <li>生成结果作为 AI 消息卡片，不跳出当前对话上下文，方便继续修改。</li>
+          </ul>
+        </section>
+
+        <section class="spec-card">
+          <div class="spec-title">视觉令牌</div>
+          <div class="palette">
+            <span class="swatch" style="background: #f6f8fc"></span>
+            <span class="swatch" style="background: #fbfdff"></span>
+            <span class="swatch" style="background: #1456f0"></span>
+            <span class="swatch" style="background: #dfe7f1"></span>
+            <span class="swatch" style="background: #181e25"></span>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </body>
+</html>

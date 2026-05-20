@@ -21,6 +21,10 @@ func (testAccountConfig) AutoRemoveInvalidAccounts() bool     { return false }
 func (testAccountConfig) AutoRemoveRateLimitedAccounts() bool { return false }
 func (testAccountConfig) Proxy() string                       { return "" }
 
+type testAutoRemoveAccountConfig struct{ testAccountConfig }
+
+func (testAutoRemoveAccountConfig) AutoRemoveInvalidAccounts() bool { return true }
+
 func TestFetchRemoteInfoBootstrapsBeforeAccountRefresh(t *testing.T) {
 	var mu sync.Mutex
 	var paths []string
@@ -213,6 +217,49 @@ func TestRefreshAccountStateMarksUnauthorizedInitAsInvalid(t *testing.T) {
 	}
 }
 
+func TestRefreshAccountStateKeepsInvalidAccountWhenAutoRemoveEnabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			writeJSON(t, w, map[string]any{"email": "user@example.com", "id": "user-1"})
+		case "/backend-api/conversation/init":
+			w.WriteHeader(http.StatusUnauthorized)
+			writeJSON(t, w, map[string]any{"detail": "token_invalidated"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	accounts := NewAccountService(
+		storage.NewJSONBackend(filepath.Join(dir, "accounts.json"), filepath.Join(dir, "auth_keys.json")),
+		testAutoRemoveAccountConfig{},
+		NewProxyService(testAutoRemoveAccountConfig{}),
+		NewLogService(dir),
+	)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+
+	account := accounts.RefreshAccountState(context.Background(), "token-1")
+	if account == nil {
+		t.Fatal("RefreshAccountState() = nil, want retained invalid account")
+	}
+	if account["status"] != "异常" {
+		t.Fatalf("status = %#v, want 异常", account["status"])
+	}
+	if got := accounts.GetAccount("token-1"); got == nil {
+		t.Fatal("GetAccount() = nil, heartbeat must not delete account")
+	}
+}
+
 func TestRefreshAccountsMarksRateLimitedResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -258,6 +305,58 @@ func TestRefreshAccountsMarksRateLimitedResponse(t *testing.T) {
 	}
 	if account["image_quota_unknown"] != false {
 		t.Fatalf("image_quota_unknown = %#v, want false", account["image_quota_unknown"])
+	}
+	if result["removed"] != 0 {
+		t.Fatalf("removed = %#v, want 0", result["removed"])
+	}
+}
+
+func TestRefreshAccountsKeepsHeartbeatFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html>ok</html>"))
+		case "/backend-api/me":
+			writeJSON(t, w, map[string]any{"email": "user@example.com", "id": "user-1"})
+		case "/backend-api/conversation/init":
+			w.WriteHeader(http.StatusBadGateway)
+			writeJSON(t, w, map[string]any{"error": map[string]any{"message": "upstream connection reset"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	accounts := newTestAccountService(t)
+	accounts.remoteBaseURL = server.URL
+	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+		return server.Client()
+	}
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+
+	result := accounts.RefreshAccounts(context.Background(), []string{"token-1"})
+	if result["refreshed"] != 0 {
+		t.Fatalf("refreshed = %#v, want 0", result["refreshed"])
+	}
+	if result["removed"] != 0 {
+		t.Fatalf("removed = %#v, want 0", result["removed"])
+	}
+	errors, ok := result["errors"].([]map[string]string)
+	if !ok || len(errors) != 1 {
+		t.Fatalf("errors = %#v, want one error", result["errors"])
+	}
+	account := accounts.GetAccount("token-1")
+	if account == nil {
+		t.Fatal("GetAccount() = nil, want heartbeat failure account retained")
+	}
+	if got := strings.TrimSpace(toString(account["check_error"])); got == "" {
+		t.Fatalf("check_error = %q, want heartbeat failure recorded", got)
+	}
+	items, ok := result["items"].([]map[string]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("items = %#v, want retained account list", result["items"])
 	}
 }
 
@@ -305,6 +404,31 @@ func TestGetAvailableAccessTokenReservesKnownImageQuota(t *testing.T) {
 	}
 }
 
+func TestGetAvailableImageAccessTokenDoesNotReuseInFlightKnownQuota(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+
+	token, err := accounts.GetAvailableImageAccessToken(context.Background(), false)
+	if err != nil {
+		t.Fatalf("first GetAvailableImageAccessToken() error = %v", err)
+	}
+	if token != "token-1" {
+		t.Fatalf("first token = %q, want token-1", token)
+	}
+	if token, err := accounts.GetAvailableImageAccessToken(context.Background(), false); err == nil {
+		t.Fatalf("second GetAvailableImageAccessToken() = %q, want no reusable in-flight token", token)
+	}
+	accounts.MarkImageResult("token-1", false)
+	token, err = accounts.GetAvailableImageAccessToken(context.Background(), false)
+	if err != nil {
+		t.Fatalf("GetAvailableImageAccessToken() after release error = %v", err)
+	}
+	if token != "token-1" {
+		t.Fatalf("token after release = %q, want token-1", token)
+	}
+}
+
 func TestGetAvailableAccessTokenLimitsUnknownImageQuotaToOneInFlight(t *testing.T) {
 	accounts := newTestAccountService(t)
 	server := newAccountQuotaServer(t, map[string]any{
@@ -343,6 +467,65 @@ func TestGetAvailableAccessTokenLimitsUnknownImageQuotaToOneInFlight(t *testing.
 	accounts.MarkImageResult("token-1", false)
 }
 
+func TestGetAvailableAccessTokenUsesFreshCheckCache(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{
+		"status":     "正常",
+		"quota":      2,
+		"checked_at": time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+		t.Fatal("fresh account should not be refreshed before use")
+		return nil
+	}
+
+	token, err := accounts.GetAvailableAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetAvailableAccessToken() error = %v", err)
+	}
+	if token != "token-1" {
+		t.Fatalf("token = %q, want token-1", token)
+	}
+	accounts.MarkImageResult("token-1", false)
+}
+
+func TestGetAvailableAccessTokenUsesCachedAccountWithoutRefresh(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+		t.Fatal("image token selection should not synchronously refresh remote account state")
+		return nil
+	}
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+
+	token, err := accounts.GetAvailableAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetAvailableAccessToken() error = %v", err)
+	}
+	if token != "token-1" {
+		t.Fatalf("token = %q, want token-1", token)
+	}
+	accounts.MarkImageResult("token-1", false)
+}
+
+func TestGetTextAccessTokenRoundRobin(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1", "token-2"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常"})
+	accounts.UpdateAccount("token-2", map[string]any{"status": "正常"})
+
+	got := []string{
+		accounts.GetTextAccessToken(),
+		accounts.GetTextAccessToken(),
+		accounts.GetTextAccessToken(),
+	}
+	want := []string{"token-1", "token-2", "token-1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("round robin tokens = %#v, want %#v", got, want)
+	}
+}
+
 func TestReserveNextCandidateTokenCanFilterPaidAccounts(t *testing.T) {
 	accounts := newTestAccountService(t)
 	accounts.AddAccounts([]string{"free-token", "plus-token"})
@@ -364,6 +547,133 @@ func TestReserveNextCandidateTokenCanFilterPaidAccounts(t *testing.T) {
 	}
 }
 
+func TestReserveCandidateBatchRotatesLeaderWhenBatchCoversAllPaidAccounts(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"plus-1", "plus-2"})
+	accounts.UpdateAccount("plus-1", map[string]any{"status": "正常", "quota": 5, "type": "Plus", "checked_at": time.Now().UTC().Format(time.RFC3339Nano)})
+	accounts.UpdateAccount("plus-2", map[string]any{"status": "正常", "quota": 5, "type": "ProLite", "checked_at": time.Now().UTC().Format(time.RFC3339Nano)})
+
+	first, err := accounts.reserveCandidateBatch(map[string]struct{}{}, IsPaidImageAccount, accountCandidateBatchSize)
+	if err != nil {
+		t.Fatalf("first reserveCandidateBatch() error = %v", err)
+	}
+	if len(first) != 2 || first[0].token != "plus-1" {
+		t.Fatalf("first batch = %#v, want plus-1 as leader", first)
+	}
+	accounts.releaseImageReservationsExcept(first, "")
+
+	second, err := accounts.reserveCandidateBatch(map[string]struct{}{}, IsPaidImageAccount, accountCandidateBatchSize)
+	if err != nil {
+		t.Fatalf("second reserveCandidateBatch() error = %v", err)
+	}
+	if len(second) != 2 || second[0].token != "plus-2" {
+		t.Fatalf("second batch = %#v, want plus-2 as leader", second)
+	}
+	accounts.releaseImageReservationsExcept(second, "")
+}
+
+func TestGetAvailableAccessTokenPrefersHealthyImageAccounts(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"bad-paid", "healthy-free"})
+	accounts.UpdateAccount("bad-paid", map[string]any{"status": "正常", "quota": 5, "type": "Plus", "success": 100, "fail": 90})
+	accounts.UpdateAccount("healthy-free", map[string]any{"status": "正常", "quota": 5, "type": "Free", "success": 1, "fail": 0})
+
+	token, err := accounts.GetAvailableImageAccessToken(context.Background(), false)
+	if err != nil {
+		t.Fatalf("GetAvailableImageAccessToken() error = %v", err)
+	}
+	if token != "healthy-free" {
+		t.Fatalf("token = %q, want healthy-free", token)
+	}
+	accounts.MarkImageResult(token, true)
+}
+
+func TestGetAvailableImageAccessTokenDoesNotStarveUntestedAccountsBehindNoisyProvenAccounts(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"untested-free", "proven-plus"})
+	accounts.UpdateAccount("untested-free", map[string]any{"status": "正常", "quota": 25, "type": "Free", "success": 0, "fail": 0})
+	accounts.UpdateAccount("proven-plus", map[string]any{"status": "正常", "quota": 25, "type": "Plus", "success": 111, "fail": 89})
+
+	token, err := accounts.GetAvailableImageAccessToken(context.Background(), false)
+	if err != nil {
+		t.Fatalf("GetAvailableImageAccessToken() error = %v", err)
+	}
+	if token != "untested-free" {
+		t.Fatalf("token = %q, want untested-free", token)
+	}
+	accounts.MarkImageResult(token, true)
+}
+
+func TestGetAvailableImageAccessTokenRoundRobinsHealthyWindow(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1", "token-2", "token-3"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5, "type": "Free", "success": 1, "fail": 0})
+	accounts.UpdateAccount("token-2", map[string]any{"status": "正常", "quota": 5, "type": "Free", "success": 0, "fail": 0})
+	accounts.UpdateAccount("token-3", map[string]any{"status": "正常", "quota": 5, "type": "Plus", "success": 1, "fail": 0})
+
+	got := make([]string, 0, 4)
+	for range 4 {
+		token, err := accounts.GetAvailableImageAccessToken(context.Background(), false)
+		if err != nil {
+			t.Fatalf("GetAvailableImageAccessToken() error = %v", err)
+		}
+		got = append(got, token)
+		accounts.ReleaseImageSlot(token)
+	}
+	want := []string{"token-1", "token-2", "token-3", "token-1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tokens = %#v, want %#v", got, want)
+	}
+}
+
+func TestGetAvailableImageAccessTokenPrefersHealthyPaidAccount(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"healthy-free", "healthy-paid"})
+	accounts.UpdateAccount("healthy-free", map[string]any{"status": "正常", "quota": 5, "type": "Free", "success": 1, "fail": 0})
+	accounts.UpdateAccount("healthy-paid", map[string]any{"status": "正常", "quota": 5, "type": "Plus", "success": 1, "fail": 0})
+
+	token, err := accounts.GetAvailableImageAccessToken(context.Background(), true)
+	if err != nil {
+		t.Fatalf("GetAvailableImageAccessToken() error = %v", err)
+	}
+	if token != "healthy-paid" {
+		t.Fatalf("token = %q, want healthy-paid", token)
+	}
+	accounts.MarkImageResult(token, true)
+}
+
+func TestGetAvailableImageAccessTokenAllowsHealthyFreeOverUnhealthyPaid(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"bad-paid", "healthy-free"})
+	accounts.UpdateAccount("bad-paid", map[string]any{"status": "正常", "quota": 5, "type": "Plus", "success": 100, "fail": 90})
+	accounts.UpdateAccount("healthy-free", map[string]any{"status": "正常", "quota": 5, "type": "Free", "success": 1, "fail": 0})
+
+	token, err := accounts.GetAvailableImageAccessToken(context.Background(), true)
+	if err != nil {
+		t.Fatalf("GetAvailableImageAccessToken() error = %v", err)
+	}
+	if token != "healthy-free" {
+		t.Fatalf("token = %q, want healthy-free", token)
+	}
+	accounts.MarkImageResult(token, true)
+}
+
+func TestGetAvailableImageAccessTokenFallsBackWhenPaidUnavailable(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"limited-paid", "healthy-free"})
+	accounts.UpdateAccount("limited-paid", map[string]any{"status": "限流", "quota": 0, "type": "Plus"})
+	accounts.UpdateAccount("healthy-free", map[string]any{"status": "正常", "quota": 5, "type": "Free"})
+
+	token, err := accounts.GetAvailableImageAccessToken(context.Background(), true)
+	if err != nil {
+		t.Fatalf("GetAvailableImageAccessToken() error = %v", err)
+	}
+	if token != "healthy-free" {
+		t.Fatalf("token = %q, want healthy-free fallback", token)
+	}
+	accounts.MarkImageResult(token, true)
+}
+
 func TestApplyAccountErrorMessageDetectsImageStreamFailures(t *testing.T) {
 	accounts := newTestAccountService(t)
 	accounts.AddAccounts([]string{"token-invalid", "token-limited"})
@@ -376,6 +686,16 @@ func TestApplyAccountErrorMessageDetectsImageStreamFailures(t *testing.T) {
 	}
 	if account := accounts.GetAccount("token-invalid"); account["status"] != "异常" || account["quota"] != 0 {
 		t.Fatalf("invalid account = %#v, want status 异常 quota 0", account)
+	}
+
+	accounts.AddAccounts([]string{"token-expired"})
+	accounts.UpdateAccount("token-expired", map[string]any{"status": "正常", "quota": 5})
+	message, handled = accounts.ApplyAccountErrorMessage("token-expired", "text_stream", "auth failed: access token expired")
+	if !handled || message != "检测到封号" {
+		t.Fatalf("expired handled = %v message = %q, want 检测到封号", handled, message)
+	}
+	if account := accounts.GetAccount("token-expired"); account["status"] != "异常" || account["quota"] != 0 {
+		t.Fatalf("expired account = %#v, want status 异常 quota 0", account)
 	}
 
 	message, handled = accounts.ApplyAccountErrorMessage("token-limited", "image_stream", "You've reached the image generation limit for now.")
@@ -400,6 +720,150 @@ func TestApplyAccountErrorMessageIgnoresBootstrapFailures(t *testing.T) {
 	if account["status"] != "正常" || account["quota"] != 5 {
 		t.Fatalf("account = %#v, want unchanged normal account", account)
 	}
+}
+
+func TestApplyAccountErrorMessageCoolsDownImageStreamBootstrapTransportFailure(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+
+	message, handled := accounts.ApplyAccountErrorMessage("token-1", "image_stream", "bootstrap failed: TLS connect error: connection reset by peer")
+	if !handled {
+		t.Fatal("handled = false, want image stream bootstrap transport cooldown")
+	}
+	if !strings.Contains(message, "upstream connection failed before TLS handshake completed") {
+		t.Fatalf("message = %q", message)
+	}
+	account := accounts.GetAccount("token-1")
+	if account["check_cooldown_until"] == nil || account["check_error"] == nil {
+		t.Fatalf("account cooldown fields missing: %#v", account)
+	}
+}
+
+func TestApplyAccountErrorMessageCoolsDownTransientFailures(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+
+	message, handled := accounts.ApplyAccountErrorMessage("token-1", "text_stream", "TLS connect error: connection reset by peer")
+	if !handled {
+		t.Fatal("handled = false, want transient cooldown")
+	}
+	if !strings.Contains(message, "upstream connection failed before TLS handshake completed") {
+		t.Fatalf("message = %q", message)
+	}
+	account := accounts.GetAccount("token-1")
+	if account["check_cooldown_until"] == nil || account["check_error"] == nil {
+		t.Fatalf("account cooldown fields missing: %#v", account)
+	}
+	if got := accounts.GetTextAccessToken(); got != "" {
+		t.Fatalf("GetTextAccessToken() = %q, want empty during cooldown", got)
+	}
+}
+
+func TestApplyAccountErrorMessageCoolsDownCloudflareOriginFailures(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+
+	message, handled := accounts.ApplyAccountErrorMessage("token-1", "image_stream", "源服务器向 Cloudflare 返回了无效或不完整的响应。")
+	if !handled || message != "upstream returned Cloudflare origin error page; retry with another account/proxy if it repeats" {
+		t.Fatalf("handled = %v message = %q, want cloudflare origin cooldown", handled, message)
+	}
+	account := accounts.GetAccount("token-1")
+	if account["check_cooldown_until"] == nil || account["check_error"] == nil {
+		t.Fatalf("account cooldown fields missing: %#v", account)
+	}
+	if IsImageAccountAvailable(account) {
+		t.Fatalf("account should be unavailable during check cooldown: %#v", account)
+	}
+}
+
+func TestApplyAccountErrorMessageCoolsDownNoImageResult(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+
+	message, handled := accounts.ApplyAccountErrorMessage("token-1", "image_stream", "image generation produced no image result")
+	if !handled || message != "检测到临时网络异常，账号已短暂冷却" {
+		t.Fatalf("handled = %v message = %q, want no-image-result cooldown", handled, message)
+	}
+	account := accounts.GetAccount("token-1")
+	if account["check_cooldown_until"] == nil || account["check_error"] == nil {
+		t.Fatalf("account cooldown fields missing: %#v", account)
+	}
+	if IsImageAccountAvailable(account) {
+		t.Fatalf("account should be unavailable during check cooldown: %#v", account)
+	}
+}
+
+func TestMarkImageAttemptTimeoutCoolsDownAccount(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1", "token-2"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+	accounts.UpdateAccount("token-2", map[string]any{"status": "正常", "quota": 5})
+
+	token, err := accounts.GetAvailableImageAccessToken(context.Background(), false)
+	if err != nil {
+		t.Fatalf("GetAvailableImageAccessToken() error = %v", err)
+	}
+	accounts.MarkImageAttemptTimeout(token)
+	account := accounts.GetAccount(token)
+	if account["fail"] != 1 {
+		t.Fatalf("fail = %#v, want 1 in %#v", account["fail"], account)
+	}
+	if !accountCheckCoolingDown(account, time.Now().UTC()) {
+		t.Fatalf("timed out account should cool down: %#v", account)
+	}
+	next, err := accounts.GetAvailableImageAccessToken(context.Background(), false)
+	if err != nil {
+		t.Fatalf("GetAvailableImageAccessToken() after timeout error = %v", err)
+	}
+	if next == token {
+		t.Fatalf("timed out token was selected again during cooldown")
+	}
+}
+
+func TestApplyAccountErrorMessageCoolsDownCodexToolChoiceFailures(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.AddAccounts([]string{"token-1"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+
+	message, handled := accounts.ApplyAccountErrorMessage("token-1", "image_stream", `/backend-api/codex/responses failed: status=400, body={"error":{"message":"Tool choice 'required' must be specified with 'tools' parameter.","param":"tool_choice"}}`)
+	if !handled || message != "检测到临时网络异常，账号已短暂冷却" {
+		t.Fatalf("handled = %v message = %q, want codex tool choice cooldown", handled, message)
+	}
+	account := accounts.GetAccount("token-1")
+	if account["check_cooldown_until"] == nil || account["check_error"] == nil {
+		t.Fatalf("account cooldown fields missing: %#v", account)
+	}
+	if IsImageAccountAvailable(account) {
+		t.Fatalf("account should be unavailable during check cooldown: %#v", account)
+	}
+}
+
+func TestGetAvailableAccessTokenStartsImmediatelyWithoutRemoteProbe(t *testing.T) {
+	accounts := newTestAccountService(t)
+	accounts.browserHTTPClient = func(string, time.Duration) *http.Client {
+		t.Fatal("image token selection should not block on remote probe")
+		return nil
+	}
+	accounts.AddAccounts([]string{"token-1", "token-2"})
+	accounts.UpdateAccount("token-1", map[string]any{"status": "正常", "quota": 5})
+	accounts.UpdateAccount("token-2", map[string]any{"status": "正常", "quota": 5})
+
+	start := time.Now()
+	token, err := accounts.GetAvailableAccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("GetAvailableAccessToken() error = %v", err)
+	}
+	if token != "token-1" {
+		t.Fatalf("token = %q, want token-1", token)
+	}
+	if elapsed := time.Since(start); elapsed >= 100*time.Millisecond {
+		t.Fatalf("GetAvailableAccessToken() took %s, want immediate cached selection", elapsed)
+	}
+	accounts.MarkImageResult("token-1", false)
 }
 
 func newTestAccountService(t *testing.T) *AccountService {

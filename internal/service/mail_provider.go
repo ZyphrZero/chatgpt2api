@@ -66,6 +66,11 @@ type registerTempMailLOLProvider struct {
 	entry map[string]any
 }
 
+type registerMailtempEduProvider struct {
+	registerHTTPMailProvider
+	entry map[string]any
+}
+
 type registerDuckMailProvider struct {
 	registerHTTPMailProvider
 	entry map[string]any
@@ -132,6 +137,8 @@ func createRegisterMailProvider(mailConfig map[string]any, providerName, provide
 		return &registerCloudflareTempMailProvider{registerHTTPMailProvider: base, entry: entry}, nil
 	case "tempmail_lol":
 		return &registerTempMailLOLProvider{registerHTTPMailProvider: base, entry: entry}, nil
+	case "mailtemp_edu":
+		return &registerMailtempEduProvider{registerHTTPMailProvider: base, entry: entry}, nil
 	case "duckmail":
 		return &registerDuckMailProvider{registerHTTPMailProvider: base, entry: entry}, nil
 	case "gptmail":
@@ -297,6 +304,7 @@ func extractRegisterMailContent(data map[string]any) (string, string) {
 	textContent := firstNonEmpty(
 		registerContentString(data["text_content"]),
 		registerContentString(data["text"]),
+		registerContentString(data["body_text"]),
 		registerContentString(data["body"]),
 		registerContentString(data["content"]),
 	)
@@ -702,6 +710,127 @@ func (p *registerTempMailLOLProvider) FetchLatestMessage(mailbox map[string]any)
 		"text_content": textContent,
 		"html_content": htmlContent,
 		"raw":          latest["raw"],
+	}, nil
+}
+
+func (p *registerMailtempEduProvider) CreateMailbox(username string) (map[string]any, error) {
+	apiBase := strings.TrimRight(util.Clean(p.entry["api_base"]), "/")
+	if apiBase == "" {
+		apiBase = "https://mailtemp.edu.pl/api"
+	}
+	payload := map[string]any{}
+	if username = strings.TrimSpace(username); username != "" {
+		payload["prefix"] = username
+	}
+	if domainID, err := p.mailtempEduDomainID(apiBase); err != nil || domainID != 0 {
+		if err != nil {
+			return nil, fmt.Errorf("mailtemp_edu domain lookup failed: %w", err)
+		}
+		payload["domain_id"] = domainID
+	}
+	data, err := registerMailRequestJSON(p.client, http.MethodPost, apiBase+"/create-session", map[string]string{
+		"Content-Type": "application/json",
+		"User-Agent":   p.conf.UserAgent,
+		"Accept":       "application/json",
+	}, nil, payload, http.StatusOK, http.StatusCreated)
+	if err != nil {
+		return nil, err
+	}
+	if status := util.Clean(data["status"]); status != "" && status != "success" {
+		return nil, fmt.Errorf("mailtemp_edu create-session failed: %s", firstNonEmpty(util.Clean(data["message"]), status))
+	}
+	address := util.Clean(data["email"])
+	token := util.Clean(data["token"])
+	if address == "" || token == "" {
+		return nil, fmt.Errorf("mailtemp_edu response missing email or token")
+	}
+	return map[string]any{"provider": "mailtemp_edu", "provider_ref": p.entry["provider_ref"], "address": address, "token": token, "expires_at": data["expires_at"]}, nil
+}
+
+func (p *registerMailtempEduProvider) mailtempEduDomainID(apiBase string) (int, error) {
+	configured := util.AsStringSlice(p.entry["domain"])
+	domains, err := registerMailRequestJSON(p.client, http.MethodGet, apiBase+"/domains", map[string]string{
+		"User-Agent": p.conf.UserAgent,
+		"Accept":     "application/json",
+	}, nil, nil, http.StatusOK)
+	if err != nil {
+		if len(configured) == 0 {
+			return 0, nil
+		}
+		return 0, err
+	}
+	items := util.AsMapSlice(domains["domains"])
+	if len(items) == 0 {
+		return 0, nil
+	}
+	if len(configured) == 0 {
+		return util.ToInt(items[0]["id"], 0), nil
+	}
+	wanted := map[string]struct{}{}
+	for _, domain := range configured {
+		if domain = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(domain), "@")); domain != "" {
+			wanted[domain] = struct{}{}
+		}
+	}
+	for _, item := range items {
+		domain := strings.ToLower(strings.TrimPrefix(util.Clean(item["domain"]), "@"))
+		if _, ok := wanted[domain]; ok {
+			return util.ToInt(item["id"], 0), nil
+		}
+	}
+	return 0, fmt.Errorf("configured domain not found: %s", strings.Join(configured, ","))
+}
+
+func (p *registerMailtempEduProvider) FetchLatestMessage(mailbox map[string]any) (map[string]any, error) {
+	apiBase := strings.TrimRight(util.Clean(p.entry["api_base"]), "/")
+	if apiBase == "" {
+		apiBase = "https://mailtemp.edu.pl/api"
+	}
+	token := util.Clean(mailbox["token"])
+	data, err := registerMailRequestJSON(p.client, http.MethodGet, apiBase+"/check-mail", map[string]string{
+		"User-Agent": p.conf.UserAgent,
+		"Accept":     "application/json",
+	}, map[string]string{"token": token, "force": "1"}, nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	if status := util.Clean(data["status"]); status != "" && status != "success" {
+		if util.Clean(data["message"]) == "Session expired" {
+			return nil, fmt.Errorf("mailtemp_edu session expired")
+		}
+		return nil, fmt.Errorf("mailtemp_edu check-mail failed: %s", firstNonEmpty(util.Clean(data["message"]), status))
+	}
+	items := util.AsMapSlice(data["messages"])
+	if len(items) == 0 {
+		return nil, nil
+	}
+	latest := latestRegisterMailMessage(items)
+	messageID := registerMessageID(latest)
+	message := latest
+	if messageID != "" {
+		detail, detailErr := registerMailRequestJSON(p.client, http.MethodGet, apiBase+"/read-mail", map[string]string{
+			"User-Agent": p.conf.UserAgent,
+			"Accept":     "application/json",
+		}, map[string]string{"token": token, "id": messageID}, nil, http.StatusOK)
+		if detailErr == nil {
+			if nested := util.StringMap(detail["message"]); len(nested) > 0 {
+				message = nested
+			} else {
+				message = detail
+			}
+		}
+	}
+	textContent, htmlContent := extractRegisterMailContent(message)
+	return map[string]any{
+		"provider":     "mailtemp_edu",
+		"mailbox":      util.Clean(mailbox["address"]),
+		"message_id":   firstNonEmpty(registerMessageID(message), messageID),
+		"subject":      firstNonEmpty(util.Clean(message["subject"]), util.Clean(latest["subject"])),
+		"sender":       firstNonEmpty(util.Clean(message["sender_email"]), util.Clean(message["from"]), util.Clean(latest["sender_email"]), util.Clean(latest["from"])),
+		"text_content": textContent,
+		"html_content": htmlContent,
+		"received_at":  firstNonNil(message["received_at"], message["created_at"], message["date"], message["timestamp"], latest["received_at"], latest["created_at"], latest["date"], latest["timestamp"]),
+		"raw":          firstNonNil(message["raw"], message["source"]),
 	}, nil
 }
 

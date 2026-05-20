@@ -330,7 +330,7 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
             <a
               href={sessionUrl}
               target="_blank"
-              rel="noreferrer"
+              rel="noopener noreferrer"
               className="inline-flex items-center gap-1 font-medium text-stone-900 underline underline-offset-4"
             >
               {sessionUrl}

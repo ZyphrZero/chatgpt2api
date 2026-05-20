@@ -23,6 +23,7 @@ const (
 	TaskStatusCancelled = "cancelled"
 
 	defaultImageTaskTimeout = 5 * time.Minute
+	staleQueuedTaskAge      = 10 * time.Second
 )
 
 type ImageTaskHandler func(context.Context, Identity, map[string]any) (map[string]any, error)
@@ -222,7 +223,12 @@ func (s *ImageTaskService) ListTasks(identity Identity, taskIDs []string) map[st
 		}
 	}
 	s.mu.Lock()
+	expired, cancels := s.expireTimedOutRunningTasksLocked(time.Now())
+	changed := expired
 	if s.cleanupLocked() {
+		changed = true
+	}
+	if changed {
 		_ = s.saveLocked()
 	}
 	items := make([]map[string]any, 0)
@@ -245,6 +251,9 @@ func (s *ImageTaskService) ListTasks(identity Identity, taskIDs []string) map[st
 		}
 	}
 	s.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
 	return map[string]any{"items": items, "missing_ids": missing}
 }
 
@@ -292,6 +301,23 @@ func (s *ImageTaskService) submit(ctx context.Context, identity Identity, client
 	s.mu.Lock()
 	cleaned := s.cleanupLocked()
 	if existing := s.tasks[key]; existing != nil {
+		if util.Clean(existing["status"]) == TaskStatusQueued && taskAge(existing, now) >= staleQueuedTaskAge {
+			oldCancel := s.cancels[key]
+			taskCtx, cancel := context.WithCancel(context.Background())
+			runID := newTaskRunID()
+			existing["run_id"] = runID
+			existing["error"] = ""
+			existing["updated_at"] = now
+			s.cancels[key] = cancel
+			_ = s.saveLocked()
+			result := publicTask(existing)
+			s.mu.Unlock()
+			if oldCancel != nil {
+				oldCancel()
+			}
+			go s.runTask(taskCtx, key, runID, mode, identity, payload)
+			return result, nil
+		}
 		if cleaned {
 			_ = s.saveLocked()
 		}
@@ -308,7 +334,8 @@ func (s *ImageTaskService) submit(ctx context.Context, identity Identity, client
 		return nil, err
 	}
 	taskCtx, cancel := context.WithCancel(context.Background())
-	task := map[string]any{"id": taskID, "owner_id": owner, "status": TaskStatusQueued, "mode": mode, "model": firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto), "size": util.Clean(payload["size"]), "quality": util.Clean(payload["quality"]), "output_format": NormalizeImageOutputFormat(util.Clean(payload["output_format"])), "visibility": util.Clean(payload["visibility"]), "count": count, "created_at": now, "updated_at": now}
+	runID := newTaskRunID()
+	task := map[string]any{"id": taskID, "owner_id": owner, "status": TaskStatusQueued, "mode": mode, "model": firstNonEmpty(util.Clean(payload["model"]), util.ImageModelAuto), "size": util.Clean(payload["size"]), "quality": util.Clean(payload["quality"]), "output_format": NormalizeImageOutputFormat(util.Clean(payload["output_format"])), "visibility": util.Clean(payload["visibility"]), "count": count, "run_id": runID, "created_at": now, "updated_at": now}
 	if compression, ok := normalizedImageOutputCompressionValue(payload["output_compression"]); ok {
 		task["output_compression"] = compression
 	}
@@ -317,21 +344,21 @@ func (s *ImageTaskService) submit(ctx context.Context, identity Identity, client
 	_ = s.saveLocked()
 	result := publicTask(task)
 	s.mu.Unlock()
-	go s.runTask(taskCtx, key, mode, identity, payload)
+	go s.runTask(taskCtx, key, runID, mode, identity, payload)
 	return result, nil
 }
 
-func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identity Identity, payload map[string]any) {
-	defer s.removeTaskCancel(key)
+func (s *ImageTaskService) runTask(ctx context.Context, key, runID, mode string, identity Identity, payload map[string]any) {
+	defer s.removeTaskCancel(key, runID)
 	if isImageTaskMode(mode) {
 		slots, ok := s.acquireImageSlots(ctx, imageTaskCount(payload))
 		if !ok {
-			s.updateActiveTask(key, map[string]any{"status": TaskStatusCancelled, "error": "任务已终止", "data": []any{}})
+			s.updateActiveTaskForRun(key, runID, map[string]any{"status": TaskStatusCancelled, "error": "任务已终止", "data": []any{}}, true)
 			return
 		}
 		defer s.releaseImageSlots(slots)
 	}
-	if !s.updateActiveTask(key, map[string]any{"status": TaskStatusRunning, "error": ""}) {
+	if !s.updateActiveTaskForRun(key, runID, map[string]any{"status": TaskStatusRunning, "error": ""}, false) {
 		return
 	}
 	runCtx, cancel := context.WithTimeout(ctx, s.taskTimeout())
@@ -345,21 +372,28 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 	} else if mode == "response-image" {
 		handler = s.responseImage
 	}
-	result, err := handler(runCtx, identity, payload)
+	runPayload := payload
+	result, err := handler(runCtx, identity, runPayload)
 	if err != nil {
+		if util.Clean(result["output_type"]) == "text" {
+			if data := textTaskResultData(result); len(data) > 0 {
+				s.updateActiveTaskForRun(key, runID, map[string]any{"status": TaskStatusSuccess, "data": data, "error": "", "output_type": "text"}, true)
+				return
+			}
+		}
 		status := TaskStatusError
 		message := err.Error()
 		if ctx.Err() != nil {
 			status = TaskStatusCancelled
 			message = "任务已终止"
 		} else if runCtx.Err() == context.DeadlineExceeded {
-			message = "图片生成超时，请稍后重试或降低分辨率"
+			message = "图片生成超过等待上限，请稍后重试或切换账号"
 		}
 		updates := map[string]any{"status": status, "error": message, "data": taskResultData(result)}
 		if outputType := util.Clean(result["output_type"]); outputType != "" {
 			updates["output_type"] = outputType
 		}
-		s.updateActiveTask(key, updates)
+		s.updateActiveTaskForRun(key, runID, updates, true)
 		return
 	}
 	data := util.AsMapSlice(result["data"])
@@ -375,21 +409,32 @@ func (s *ImageTaskService) runTask(ctx context.Context, key, mode string, identi
 		if outputType != "" {
 			updates["output_type"] = outputType
 		}
-		s.updateActiveTask(key, updates)
+		s.updateActiveTaskForRun(key, runID, updates, true)
 		return
 	}
 	updates := map[string]any{"status": TaskStatusSuccess, "data": data, "error": ""}
 	if outputType != "" {
 		updates["output_type"] = outputType
 	}
-	s.updateActiveTask(key, updates)
+	s.updateActiveTaskForRun(key, runID, updates, true)
+}
+
+func textTaskResultData(result map[string]any) []map[string]any {
+	data := util.AsMapSlice(result["data"])
+	if len(data) > 0 {
+		return data
+	}
+	if text := util.Clean(result["message"]); text != "" {
+		return []map[string]any{{"text_response": text}}
+	}
+	return nil
 }
 
 func (s *ImageTaskService) acquireImageSlots(ctx context.Context, requested int) (int, bool) {
 	if requested < 1 {
 		requested = 1
 	}
-	ticker := time.NewTicker(250 * time.Millisecond)
+	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		limit := s.imageConcurrentLimit()
@@ -424,6 +469,12 @@ func (s *ImageTaskService) releaseImageSlots(slots int) {
 	}
 }
 
+func (s *ImageTaskService) currentRunningImages() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.runningImages
+}
+
 func (s *ImageTaskService) imageConcurrentLimit() int {
 	limit := 4
 	if s.concurrentLimit != nil {
@@ -433,6 +484,30 @@ func (s *ImageTaskService) imageConcurrentLimit() int {
 		return 1
 	}
 	return limit
+}
+
+func imageTaskMaxWorkersForLoad(active, limit int) int {
+	if active < 1 {
+		active = 1
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	light := limit / 4
+	if light < 1 {
+		light = 1
+	}
+	medium := limit / 2
+	if medium <= light {
+		medium = light + 1
+	}
+	if active <= light {
+		return 4
+	}
+	if active <= medium {
+		return 2
+	}
+	return 2
 }
 
 func (s *ImageTaskService) taskTimeout() time.Duration {
@@ -508,10 +583,21 @@ func (s *ImageTaskService) userImageRPMLimit() int {
 }
 
 func (s *ImageTaskService) updateActiveTask(key string, updates map[string]any) bool {
+	return s.updateActiveTaskForRun(key, "", updates, true)
+}
+
+func (s *ImageTaskService) updateActiveTaskTransient(key string, updates map[string]any) bool {
+	return s.updateActiveTaskForRun(key, "", updates, false)
+}
+
+func (s *ImageTaskService) updateActiveTaskForRun(key, runID string, updates map[string]any, save bool) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	task := s.tasks[key]
 	if task == nil {
+		return false
+	}
+	if runID != "" && util.Clean(task["run_id"]) != runID {
 		return false
 	}
 	if !isActiveTaskStatus(util.Clean(task["status"])) {
@@ -521,13 +607,21 @@ func (s *ImageTaskService) updateActiveTask(key string, updates map[string]any) 
 		task[k] = v
 	}
 	task["updated_at"] = util.NowLocal()
-	_ = s.saveLocked()
+	if save {
+		_ = s.saveLocked()
+	}
 	return true
 }
 
-func (s *ImageTaskService) removeTaskCancel(key string) {
+func (s *ImageTaskService) removeTaskCancel(key, runID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if runID != "" {
+		task := s.tasks[key]
+		if task != nil && util.Clean(task["run_id"]) != runID {
+			return
+		}
+	}
 	delete(s.cancels, key)
 }
 
@@ -613,6 +707,35 @@ func (s *ImageTaskService) recoverUnfinishedLocked() bool {
 	return changed
 }
 
+func (s *ImageTaskService) expireTimedOutRunningTasksLocked(now time.Time) (bool, []context.CancelFunc) {
+	timeout := s.taskTimeout()
+	grace := 30 * time.Second
+	changed := false
+	cancels := make([]context.CancelFunc, 0)
+	nowText := util.NowLocal()
+	for key, task := range s.tasks {
+		if task["status"] != TaskStatusRunning {
+			continue
+		}
+		updatedAt := parseTaskTime(task["updated_at"])
+		if updatedAt.IsZero() || now.Sub(updatedAt) < timeout+grace {
+			continue
+		}
+		task["status"] = TaskStatusError
+		task["error"] = "图片生成超过等待上限，请稍后重试或切换账号"
+		if task["data"] == nil {
+			task["data"] = []any{}
+		}
+		task["updated_at"] = nowText
+		if cancel := s.cancels[key]; cancel != nil {
+			cancels = append(cancels, cancel)
+			delete(s.cancels, key)
+		}
+		changed = true
+	}
+	return changed, cancels
+}
+
 func (s *ImageTaskService) cleanupLocked() bool {
 	days := 30
 	if s.retentionGetter != nil {
@@ -681,6 +804,23 @@ func ownerID(identity Identity) string {
 
 func taskKey(owner, id string) string {
 	return owner + ":" + id
+}
+
+func newTaskRunID() string {
+	return util.NewHex(16)
+}
+
+func taskAge(task map[string]any, now string) time.Duration {
+	updatedAt := parseTaskTime(task["updated_at"])
+	nowAt := parseTaskTime(now)
+	if updatedAt.IsZero() || nowAt.IsZero() {
+		return 0
+	}
+	age := nowAt.Sub(updatedAt)
+	if age < 0 {
+		return 0
+	}
+	return age
 }
 
 func normalizedImageTaskCount(n int) int {
@@ -790,10 +930,13 @@ func isActiveTaskStatus(status string) bool {
 
 func parseTaskTime(value any) time.Time {
 	text := util.Clean(value)
-	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05.999999", "2006-01-02T15:04:05", time.RFC3339Nano} {
-		if t, err := time.Parse(layout, text); err == nil {
+	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05.999999", "2006-01-02T15:04:05"} {
+		if t, err := time.ParseInLocation(layout, text, time.Local); err == nil {
 			return t
 		}
+	}
+	if t, err := time.Parse(time.RFC3339Nano, text); err == nil {
+		return t
 	}
 	return time.Unix(0, 0)
 }

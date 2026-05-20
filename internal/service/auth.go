@@ -20,6 +20,7 @@ const (
 
 	AuthProviderLocal   = "local"
 	AuthProviderLinuxDo = "linuxdo"
+	AuthProviderQQ      = "qq"
 
 	DefaultManagedRoleID = "default-user"
 
@@ -27,34 +28,56 @@ const (
 )
 
 type Identity struct {
-	ID             string
-	Name           string
-	Role           string
-	RoleID         string
-	RoleName       string
-	Provider       string
-	OwnerID        string
-	CredentialID   string
-	CredentialName string
-	Kind           string
-	MenuPaths      []string
-	APIPermissions []string
+	ID                  string
+	Name                string
+	Role                string
+	RoleID              string
+	RoleName            string
+	Provider            string
+	OwnerID             string
+	CredentialID        string
+	CredentialName      string
+	Kind                string
+	MenuPaths           []string
+	APIPermissions      []string
+	ImageQuotaTotal     any
+	ImageQuotaUsed      int
+	ImageQuotaRemaining any
+	InviteCode          string
+	InvitedBy           string
+	InviteRewardTotal   int
+	InviteBonusTotal    int
+	LastCheckinDate     string
+	CheckinStreak       int
+	CheckinTotal        int
+	CheckinRewardTotal  int
 }
 
 func (i Identity) Map() map[string]any {
 	return map[string]any{
-		"id":              i.ID,
-		"name":            i.Name,
-		"role":            i.Role,
-		"role_id":         i.RoleID,
-		"role_name":       i.RoleName,
-		"provider":        i.Provider,
-		"owner_id":        i.OwnerID,
-		"credential_id":   i.CredentialID,
-		"credential_name": i.CredentialName,
-		"kind":            i.Kind,
-		"menu_paths":      append([]string(nil), i.MenuPaths...),
-		"api_permissions": append([]string(nil), i.APIPermissions...),
+		"id":                    i.ID,
+		"name":                  i.Name,
+		"role":                  i.Role,
+		"role_id":               i.RoleID,
+		"role_name":             i.RoleName,
+		"provider":              i.Provider,
+		"owner_id":              i.OwnerID,
+		"credential_id":         i.CredentialID,
+		"credential_name":       i.CredentialName,
+		"kind":                  i.Kind,
+		"menu_paths":            append([]string(nil), i.MenuPaths...),
+		"api_permissions":       append([]string(nil), i.APIPermissions...),
+		"image_quota_total":     i.ImageQuotaTotal,
+		"image_quota_used":      i.ImageQuotaUsed,
+		"image_quota_remaining": i.ImageQuotaRemaining,
+		"invite_code":           i.InviteCode,
+		"invited_by":            i.InvitedBy,
+		"invite_reward_total":   i.InviteRewardTotal,
+		"invite_bonus_total":    i.InviteBonusTotal,
+		"last_checkin_date":     i.LastCheckinDate,
+		"checkin_streak":        i.CheckinStreak,
+		"checkin_total":         i.CheckinTotal,
+		"checkin_reward_total":  i.CheckinRewardTotal,
 	}
 }
 
@@ -501,6 +524,141 @@ func (s *AuthService) UpsertLinuxDoSession(owner AuthOwner) (map[string]any, str
 		next["enabled"] = sessionEnabled
 		next["owner_name"] = name
 		next["linuxdo_level"] = owner.LinuxDoLevel
+		next["last_used_at"] = nil
+		next["updated_at"] = now
+		s.items[index] = next
+		if err := s.saveLocked(); err != nil {
+			return nil, "", err
+		}
+		return publicAuthItem(next), raw, nil
+	}
+
+	item := newAuthItem(AuthRoleUser, AuthKindSession, name, owner, raw)
+	if roleID, ok := managedAuthRoleIDLocked(s.items, s.accounts, owner.ID); ok {
+		s.applyRoleToAuthItem(item, roleID)
+	} else {
+		s.applyRoleToAuthItem(item, "")
+	}
+	item["enabled"] = sessionEnabled
+	s.items = append(s.items, item)
+	if err := s.saveLocked(); err != nil {
+		return nil, "", err
+	}
+	return publicAuthItem(item), raw, nil
+}
+
+func (s *AuthService) UpsertQQSession(owner AuthOwner) (map[string]any, string, error) {
+	owner.ID = util.Clean(owner.ID)
+	owner.Name = util.Clean(owner.Name)
+	owner.Provider = AuthProviderQQ
+	if owner.ID == "" {
+		return nil, "", errAuthOwnerRequired()
+	}
+	name := owner.Name
+	if name == "" {
+		name = "QQ 用户"
+	}
+	raw := "sess-" + util.RandomTokenURL(32)
+	now := util.NowISO()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sessionEnabled := true
+	ownerSeen := false
+	ownerHasEnabled := false
+	for _, item := range s.items {
+		if util.Clean(item["role"]) != AuthRoleUser || util.Clean(item["owner_id"]) != owner.ID {
+			continue
+		}
+		ownerSeen = true
+		if util.ToBool(util.ValueOr(item["enabled"], true)) {
+			ownerHasEnabled = true
+		}
+	}
+	if ownerSeen && !ownerHasEnabled {
+		sessionEnabled = false
+	}
+	for index, item := range s.items {
+		if util.Clean(item["kind"]) != AuthKindSession ||
+			util.Clean(item["provider"]) != AuthProviderQQ ||
+			util.Clean(item["owner_id"]) != owner.ID {
+			continue
+		}
+		next := util.CopyMap(item)
+		next["name"] = name
+		next["key"] = raw
+		next["key_hash"] = util.SHA256Hex(raw)
+		next["enabled"] = sessionEnabled
+		next["owner_name"] = name
+		next["last_used_at"] = nil
+		next["updated_at"] = now
+		s.items[index] = next
+		if err := s.saveLocked(); err != nil {
+			return nil, "", err
+		}
+		return publicAuthItem(next), raw, nil
+	}
+
+	item := newAuthItem(AuthRoleUser, AuthKindSession, name, owner, raw)
+	if roleID, ok := managedAuthRoleIDLocked(s.items, s.accounts, owner.ID); ok {
+		s.applyRoleToAuthItem(item, roleID)
+	} else {
+		s.applyRoleToAuthItem(item, "")
+	}
+	item["enabled"] = sessionEnabled
+	s.items = append(s.items, item)
+	if err := s.saveLocked(); err != nil {
+		return nil, "", err
+	}
+	return publicAuthItem(item), raw, nil
+}
+
+func (s *AuthService) UpsertProviderSession(owner AuthOwner, provider string, fallbackName string) (map[string]any, string, error) {
+	owner.ID = util.Clean(owner.ID)
+	owner.Name = util.Clean(owner.Name)
+	owner.Provider = normalizeAuthProvider(provider)
+	if owner.ID == "" {
+		return nil, "", errAuthOwnerRequired()
+	}
+	name := owner.Name
+	if name == "" {
+		name = fallbackName
+	}
+	if name == "" {
+		name = "第三方用户"
+	}
+	raw := "sess-" + util.RandomTokenURL(32)
+	now := util.NowISO()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sessionEnabled := true
+	ownerSeen := false
+	ownerHasEnabled := false
+	for _, item := range s.items {
+		if util.Clean(item["role"]) != AuthRoleUser || util.Clean(item["owner_id"]) != owner.ID {
+			continue
+		}
+		ownerSeen = true
+		if util.ToBool(util.ValueOr(item["enabled"], true)) {
+			ownerHasEnabled = true
+		}
+	}
+	if ownerSeen && !ownerHasEnabled {
+		sessionEnabled = false
+	}
+	for index, item := range s.items {
+		if util.Clean(item["kind"]) != AuthKindSession ||
+			util.Clean(item["provider"]) != owner.Provider ||
+			util.Clean(item["owner_id"]) != owner.ID {
+			continue
+		}
+		next := util.CopyMap(item)
+		next["name"] = name
+		next["key"] = raw
+		next["key_hash"] = util.SHA256Hex(raw)
+		next["enabled"] = sessionEnabled
+		next["owner_name"] = name
 		next["last_used_at"] = nil
 		next["updated_at"] = now
 		s.items[index] = next
@@ -1162,6 +1320,8 @@ func publicAuthItem(item map[string]any) map[string]any {
 }
 
 func identityForAuthItem(item map[string]any) *Identity {
+	quotaTotal := util.ValueOr(item["image_quota_total"], nil)
+	quotaRemaining := util.ValueOr(item["image_quota_remaining"], nil)
 	credentialID := util.Clean(item["id"])
 	credentialName := util.Clean(item["name"])
 	ownerID := util.Clean(item["owner_id"])
@@ -1175,18 +1335,29 @@ func identityForAuthItem(item map[string]any) *Identity {
 		name = credentialName
 	}
 	return &Identity{
-		ID:             id,
-		Name:           name,
-		Role:           util.Clean(item["role"]),
-		RoleID:         util.Clean(item["role_id"]),
-		RoleName:       util.Clean(item["role_name"]),
-		Provider:       util.Clean(item["provider"]),
-		OwnerID:        ownerID,
-		CredentialID:   credentialID,
-		CredentialName: credentialName,
-		Kind:           util.Clean(item["kind"]),
-		MenuPaths:      authItemPermissions(item).MenuPaths,
-		APIPermissions: authItemPermissions(item).APIPermissions,
+		ID:                  id,
+		Name:                name,
+		Role:                util.Clean(item["role"]),
+		RoleID:              util.Clean(item["role_id"]),
+		RoleName:            util.Clean(item["role_name"]),
+		Provider:            util.Clean(item["provider"]),
+		OwnerID:             ownerID,
+		CredentialID:        credentialID,
+		CredentialName:      credentialName,
+		Kind:                util.Clean(item["kind"]),
+		MenuPaths:           authItemPermissions(item).MenuPaths,
+		APIPermissions:      authItemPermissions(item).APIPermissions,
+		ImageQuotaTotal:     quotaTotal,
+		ImageQuotaUsed:      util.ToInt(item["image_quota_used"], 0),
+		ImageQuotaRemaining: quotaRemaining,
+		InviteCode:          util.Clean(item["invite_code"]),
+		InvitedBy:           util.Clean(item["invited_by"]),
+		InviteRewardTotal:   util.ToInt(item["invite_reward_total"], 0),
+		InviteBonusTotal:    util.ToInt(item["invite_bonus_total"], 0),
+		LastCheckinDate:     util.Clean(item["last_checkin_date"]),
+		CheckinStreak:       util.ToInt(item["checkin_streak"], 0),
+		CheckinTotal:        util.ToInt(item["checkin_total"], 0),
+		CheckinRewardTotal:  util.ToInt(item["checkin_reward_total"], 0),
 	}
 }
 
@@ -1704,6 +1875,8 @@ func normalizeAuthProvider(provider string) string {
 		return AuthProviderLocal
 	case AuthProviderLinuxDo:
 		return AuthProviderLinuxDo
+	case AuthProviderQQ, "wx", "douyin":
+		return provider
 	default:
 		return provider
 	}

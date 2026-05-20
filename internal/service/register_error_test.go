@@ -23,6 +23,15 @@ func registerErrorJSONResponse(req *http.Request, status int, body string) *http
 	}
 }
 
+func registerErrorHTMLResponse(req *http.Request, status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": []string{"text/html; charset=utf-8"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}
+}
+
 func testRegisterWorker(transport http.RoundTripper) (*registerWorker, *RegisterService) {
 	service := &RegisterService{subscribers: map[chan string]struct{}{}}
 	return &registerWorker{
@@ -103,6 +112,99 @@ func TestCreateAccountIncludesResponseDetailAndDomainHint(t *testing.T) {
 	}
 	if !registerLogsContain(service.logs, "邮箱域名很可能因滥用被封禁") {
 		t.Fatalf("logs did not contain domain-block hint: %#v", service.logs)
+	}
+}
+
+func TestRegisterUserSummarizesCloudflareChallengeHTML(t *testing.T) {
+	worker, _ := testRegisterWorker(registerErrorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/backend-api/sentinel/req":
+			return registerErrorJSONResponse(req, http.StatusOK, `{"token":"challenge-token","proofofwork":{"required":false}}`), nil
+		case "/api/accounts/user/register":
+			return registerErrorHTMLResponse(req, http.StatusForbidden, `<!doctype html><title>Just a moment...</title><script src="/cdn-cgi/challenge-platform/h/b"></script>`), nil
+		default:
+			t.Fatalf("unexpected request path: %s", req.URL.Path)
+			return nil, nil
+		}
+	}))
+
+	err := worker.registerUser(context.Background(), "user@example.test", "password")
+	if err == nil {
+		t.Fatal("registerUser() returned nil error")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "user_register_http_403, detail=") ||
+		!strings.Contains(got, "upstream returned Cloudflare challenge page") ||
+		strings.Contains(got, "challenge-platform/h/b") {
+		t.Fatalf("registerUser() error = %q", got)
+	}
+}
+
+func TestPasswordVerifyConflictIncludesResponseDetail(t *testing.T) {
+	worker, _ := testRegisterWorker(registerErrorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/accounts/authorize":
+			return registerErrorJSONResponse(req, http.StatusOK, `{}`), nil
+		case "/backend-api/sentinel/req":
+			return registerErrorJSONResponse(req, http.StatusOK, `{"token":"challenge-token","proofofwork":{"required":false}}`), nil
+		case "/api/accounts/password/verify":
+			return registerErrorJSONResponse(req, http.StatusConflict, `{"error":{"code":"state_conflict","message":"already in progress"},"request_id":"req_3"}`), nil
+		default:
+			t.Fatalf("unexpected request path: %s", req.URL.Path)
+			return nil, nil
+		}
+	}))
+
+	_, err := worker.loginAndExchangeTokens(context.Background(), "user@example.test", "password", map[string]any{"address": "user@example.test"})
+	if err == nil {
+		t.Fatal("loginAndExchangeTokens() returned nil error")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "password_verify_http_409, detail=") || !strings.Contains(got, "state_conflict") {
+		t.Fatalf("loginAndExchangeTokens() error = %q", got)
+	}
+}
+
+func TestLoginAndExchangeRetriesInvalidStateWithFreshSession(t *testing.T) {
+	attempt := 0
+	worker := &registerWorker{
+		service: &RegisterService{subscribers: map[chan string]struct{}{}},
+		index:   1,
+		config:  map[string]any{},
+		mail:    map[string]any{},
+	}
+	worker.client = &http.Client{Transport: registerErrorRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/api/accounts/authorize":
+			return registerErrorJSONResponse(req, http.StatusOK, `{}`), nil
+		case "/backend-api/sentinel/req":
+			return registerErrorJSONResponse(req, http.StatusOK, `{"token":"challenge-token","proofofwork":{"required":false}}`), nil
+		case "/api/accounts/password/verify":
+			attempt++
+			if attempt == 1 {
+				return registerErrorJSONResponse(req, http.StatusConflict, `{"error":{"code":"invalid_state","message":"Invalid session. Please start over."}}`), nil
+			}
+			return registerErrorJSONResponse(req, http.StatusOK, `{"continue_url":"https://platform.openai.com/auth/callback?code=callback-code&state=s"}`), nil
+		case "/oauth/token":
+			return registerErrorJSONResponse(req, http.StatusOK, `{"access_token":"access","refresh_token":"refresh","id_token":"id"}`), nil
+		default:
+			t.Fatalf("unexpected request path: %s", req.URL.Path)
+			return nil, nil
+		}
+	})}
+
+	tokens, err := worker.loginAndExchangeTokensWithRetry(context.Background(), "user@example.test", "password", map[string]any{"address": "user@example.test"})
+	if err != nil {
+		t.Fatalf("loginAndExchangeTokensWithRetry() error = %v", err)
+	}
+	if attempt != 2 {
+		t.Fatalf("password verify attempts = %d, want 2", attempt)
+	}
+	if tokens["access_token"] != "access" {
+		t.Fatalf("tokens = %#v", tokens)
+	}
+	if !registerLogsContain(worker.service.logs, "重建会话重试") {
+		t.Fatalf("logs did not contain retry note: %#v", worker.service.logs)
 	}
 }
 

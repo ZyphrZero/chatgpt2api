@@ -247,6 +247,9 @@ func clientIP(r *http.Request) string {
 	if r == nil {
 		return ""
 	}
+	if cfIP := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cfIP != "" {
+		return cfIP
+	}
 	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
 		return strings.TrimSpace(strings.Split(forwarded, ",")[0])
 	}

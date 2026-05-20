@@ -19,7 +19,32 @@ type AnnouncementService struct {
 func NewAnnouncementService(dataDir string, backend ...storage.Backend) *AnnouncementService {
 	s := &AnnouncementService{path: filepath.Join(dataDir, "announcements.json"), store: firstJSONDocumentStore(backend), docName: "announcements.json"}
 	s.items = s.load()
+	if migrated := migrateAnnouncementsToMarkdown(s.items); migrated {
+		_ = s.saveLocked()
+	}
 	return s
+}
+
+// migrateAnnouncementsToMarkdown rewrites any items whose content still uses the
+// retired HTML markup into the Markdown subset rendered by AnnouncementMarkdown.
+// It mutates the supplied slice in place and reports whether any item changed
+// so the caller can persist the result. Plain Markdown items are skipped, which
+// makes the migration idempotent across restarts.
+func migrateAnnouncementsToMarkdown(items []map[string]any) bool {
+	changed := false
+	for _, item := range items {
+		raw := util.Clean(item["content"])
+		if !htmlInAnnouncement(raw) {
+			continue
+		}
+		converted := announcementHTMLToMarkdown(raw)
+		if converted == raw {
+			continue
+		}
+		item["content"] = converted
+		changed = true
+	}
+	return changed
 }
 
 func (s *AnnouncementService) ListAll() []map[string]any {

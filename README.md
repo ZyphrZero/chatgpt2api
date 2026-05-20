@@ -198,7 +198,7 @@ docker compose up -d
 如果需要从当前源码构建本地镜像：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+sh deploy/docker-build-limited.sh up
 ```
 
 ## 升级与在线更新
@@ -258,10 +258,9 @@ Release 二进制在线更新流程：
 
 ```bash
 git pull
-bun install --cwd web --frozen-lockfile
-bun --cwd web run build
+cd web && npm ci && npm run build && cd ..
 go test ./...
-go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=1.0.0" -o chatgpt2api ./cmd/chatgpt2api
+go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=1.0.0" -o chatgpt2api ./internal
 ```
 
 ## 配置说明
@@ -344,10 +343,9 @@ CHATGPT2API_LINUXDO_FRONTEND_REDIRECT_URL=/auth/linuxdo/callback
 ### 后端
 
 ```bash
-bun install --cwd web --frozen-lockfile
-bun --cwd web run build
+cd web && npm ci && npm run build && cd ..
 go test ./...
-go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=0.0.0-dev" -o chatgpt2api ./cmd/chatgpt2api
+go build -tags=embed -ldflags "-X chatgpt2api/internal/version.Version=0.0.0-dev" -o chatgpt2api ./internal
 CHATGPT2API_ADMIN_PASSWORD=change_me_please ./chatgpt2api
 ```
 
@@ -381,8 +379,8 @@ http://127.0.0.1:8000
 
 ```bash
 cd web
-bun run lint
-bun run build
+npm ci
+npm run build
 ```
 
 ## 发布流程
@@ -394,8 +392,9 @@ bun run build
 `.github/workflows/ci.yml` 在 `main` push 和 pull request 上执行：
 
 - `go test ./...`
-- `bun install --frozen-lockfile`
-- `bun run build`
+- `cd web && npm ci && npm run build`
+- `go build -trimpath -tags=embed -o chatgpt2api ./internal`
+- `docker build -f deploy/Dockerfile.release -t chatgpt2api:ci .`
 
 ### Release
 
@@ -406,7 +405,7 @@ bun run build
 3. 将前端 artifact 下载到 `internal/web/dist`。
 4. GoReleaser 使用 `-tags=embed` 构建 Linux `amd64` / `arm64` 二进制。
 5. 生成 GitHub Release archive 和 `checksums.txt`。
-6. 使用 `Dockerfile.goreleaser` 构建多架构 Docker 镜像。
+6. 使用 `deploy/Dockerfile.release` 构建多架构 Docker 镜像。
 7. 推送 DockerHub 镜像。
 8. 推送 GHCR 镜像。
 
@@ -500,6 +499,9 @@ curl http://localhost:3000/v1/images/generations \
 | `model` | 图片模型，支持 `auto`、`gpt-image-2`、`codex-gpt-image-2` |
 | `prompt` | 图片生成提示词 |
 | `n` | 生成数量，当前限制为 `1-4` |
+| `size` | 可选，支持 `auto`、`1024x1024`、`1536x1024`、`1024x1536`、比例值和 `1080p` / `2k` / `4k` |
+| `quality` | 可选，支持模型可用的质量档位 |
+| `output_format` | 可选，支持 `png`、`jpeg`、`webp` |
 | `response_format` | 默认 `b64_json` |
 
 ### `POST /v1/images/edits`
@@ -520,11 +522,14 @@ curl http://localhost:3000/v1/images/edits \
 | `model` | 图片模型，支持 `auto`、`gpt-image-2`、`codex-gpt-image-2` |
 | `prompt` | 图片编辑提示词 |
 | `n` | 生成数量，当前限制为 `1-4` |
+| `size` | 可选，支持自动、固定尺寸、比例和分辨率别名 |
+| `quality` | 可选，支持模型可用的质量档位 |
+| `output_format` | 可选，支持 `png`、`jpeg`、`webp` |
 | `image` | 参考图片，使用 multipart/form-data 上传 |
 
 ### `POST /v1/chat/completions`
 
-该接口面向图片场景，不是完整通用聊天代理。
+显式传 `modalities: ["image"]` 或图片模型时会进入图片生成；普通聊天请求即使携带图片，也会保留在对话链路并自动路由到支持视觉的账号。
 
 ```bash
 curl http://localhost:3000/v1/chat/completions \
@@ -541,6 +546,24 @@ curl http://localhost:3000/v1/chat/completions \
     "modalities": ["image"],
     "n": 1
   }'
+```
+
+带参考图的普通视觉聊天示例：
+
+```json
+{
+  "model": "gpt-5",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "描述这张图的主体和风格" },
+        { "type": "image_url", "image_url": { "url": "data:image/png;base64,..." } }
+      ]
+    }
+  ],
+  "stream": true
+}
 ```
 
 ### `POST /v1/responses`

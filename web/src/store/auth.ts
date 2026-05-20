@@ -122,7 +122,7 @@ export function canAccessPath(session: StoredAuthSession | null | undefined, pat
   if (!session) {
     return false;
   }
-  if (path === "/profile" || path === "/ecommerce-agent") {
+  if (path === "/profile" || path === "/ecommerce-agent" || path === "/subscription") {
     return true;
   }
   if (session.role === "admin") {

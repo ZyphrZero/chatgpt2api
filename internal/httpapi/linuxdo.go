@@ -57,8 +57,19 @@ func (a *App) handleAuthProviders(w http.ResponseWriter, r *http.Request) {
 		"linuxdo": map[string]any{
 			"enabled": a.config.LinuxDoOAuth().Ready(),
 		},
+		"social_login": map[string]any{
+			"enabled":        a.config.SocialLogin().Ready(),
+			"qq_enabled":     a.config.SocialLogin().ProviderEnabled("qq"),
+			"wx_enabled":     a.config.SocialLogin().ProviderEnabled("wx"),
+			"douyin_enabled": a.config.SocialLogin().ProviderEnabled("douyin"),
+		},
 		"registration": map[string]any{
 			"enabled": a.config.RegistrationEnabled(),
+			"require_invite_code": a.config.RegistrationRequireInviteCode(),
+		},
+		"turnstile": map[string]any{
+			"enabled":  a.config.TurnstileReady(),
+			"site_key": a.config.TurnstileSiteKey(),
 		},
 	})
 }

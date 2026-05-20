@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -373,7 +374,12 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == base {
 		switch r.Method {
 		case http.MethodGet:
-			util.WriteJSON(w, http.StatusOK, map[string]any{"items": a.managedUsers()})
+			payload, err := a.managedUsersResponse(r)
+			if err != nil {
+				util.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			util.WriteJSON(w, http.StatusOK, payload)
 		case http.MethodPost:
 			body, err := readJSONMap(r)
 			if err != nil {
@@ -395,6 +401,14 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 				util.WriteError(w, http.StatusBadRequest, err.Error())
 				return
 			}
+			if a.profiles != nil {
+				quota := pointerFromValue(body["image_quota_total"])
+				if _, err := a.profiles.EnsureUser(util.Clean(item["id"]), quota); err != nil {
+					_ = a.auth.DeleteUser(util.Clean(item["id"]))
+					util.WriteError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+			}
 			items := a.managedUsers()
 			if current := findManagedUser(items, util.Clean(item["id"])); current != nil {
 				item = current
@@ -412,6 +426,11 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := parts[3]
+	userExists := findManagedUser(a.auth.ListUsers(), userID) != nil
+	if len(parts) == 5 && parts[4] == "quota" {
+		a.handleAdminUserQuota(w, r, userID, userExists)
+		return
+	}
 	if len(parts) == 5 && parts[4] == "key" {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -472,6 +491,10 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		body, _ := readJSONMap(r)
+		if !userExists {
+			util.WriteError(w, http.StatusNotFound, "user not found")
+			return
+		}
 		updates := map[string]any{}
 		if value, ok := body["name"]; ok {
 			updates["name"] = value
@@ -486,8 +509,39 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 			}
 			updates["role_id"] = value
 		}
+		if value, ok := body["password"]; ok && util.Clean(value) != "" {
+			if _, err := a.auth.ResetUserPassword(userID, util.Clean(value)); err != nil {
+				util.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		if value, ok := body["image_quota_total"]; ok {
+			if a.profiles != nil {
+				if _, err := a.profiles.UpdateUserQuota(userID, pointerFromValue(value)); err != nil {
+					util.WriteError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+			}
+		}
+		if value, ok := body["image_quota_delta"]; ok && util.Clean(value) != "" {
+			if a.profiles != nil {
+				delta := util.ToInt(value, 0)
+				profile, err := a.profiles.AdjustUserQuota(userID, delta)
+				if err != nil {
+					util.WriteError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				a.emitAdminQuotaNotification(userID, delta, util.ToInt(profile["image_quota_total"], 0))
+			}
+		}
 		if len(updates) == 0 {
-			util.WriteError(w, http.StatusBadRequest, "no updates provided")
+			items := a.managedUsers()
+			item := findManagedUser(items, userID)
+			if item == nil {
+				util.WriteError(w, http.StatusNotFound, "user not found")
+				return
+			}
+			util.WriteJSON(w, http.StatusOK, map[string]any{"item": item, "items": items})
 			return
 		}
 		item := a.auth.UpdateUser(userID, updates)
@@ -501,6 +555,9 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		util.WriteJSON(w, http.StatusOK, map[string]any{"item": item, "items": items})
 	case http.MethodDelete:
+		if a.profiles != nil {
+			_ = a.profiles.DeleteUser(userID)
+		}
 		if !a.auth.DeleteUser(userID) {
 			util.WriteError(w, http.StatusNotFound, "user not found")
 			return
@@ -511,8 +568,58 @@ func (a *App) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *App) handleAdminUserQuota(w http.ResponseWriter, r *http.Request, userID string, userExists bool) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !userExists {
+		util.WriteError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if a.profiles == nil {
+		util.WriteError(w, http.StatusNotFound, "user profile service not available")
+		return
+	}
+	body, err := readJSONMap(r)
+	if err != nil {
+		util.WriteError(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	delta, ok := adminQuotaDeltaFromBody(body)
+	if !ok || delta == 0 {
+		util.WriteError(w, http.StatusBadRequest, "delta is required")
+		return
+	}
+	profile, err := a.profiles.AdjustUserQuota(userID, delta)
+	if err != nil {
+		util.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	notification := a.emitAdminQuotaNotification(userID, delta, util.ToInt(profile["image_quota_total"], 0))
+	items := a.managedUsers()
+	item := findManagedUser(items, userID)
+	if item == nil {
+		util.WriteError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	util.WriteJSON(w, http.StatusOK, map[string]any{"item": item, "items": items, "notification": notification})
+}
+
+func adminQuotaDeltaFromBody(body map[string]any) (int, bool) {
+	for _, key := range []string{"delta", "amount", "image_quota_delta"} {
+		if value, ok := body[key]; ok && util.Clean(value) != "" {
+			return util.ToInt(value, 0), true
+		}
+	}
+	return 0, false
+}
+
 func (a *App) managedUsers() []map[string]any {
 	items := a.auth.ListUsers()
+	if a.profiles != nil {
+		items = a.profiles.EnrichUsers(items)
+	}
 	stats := a.logs.UserUsageStats(14)
 	for _, item := range items {
 		userID := util.Clean(item["id"])
@@ -527,6 +634,160 @@ func (a *App) managedUsers() []map[string]any {
 	return items
 }
 
+type managedUsersQuery struct {
+	Page       int
+	PageSize   int
+	Search     string
+	Provider   string
+	Status     string
+	Total      int
+	TotalPages int
+}
+
+// managedUsersResponse mirrors the upstream v0.1.8 admin-users list contract:
+// `{items, total, page, page_size, total_pages}` with search/provider/status filters.
+// We keep calling our own `managedUsers()` so the response still carries EnrichUsers
+// fields (invite_code, invite_reward_total, image_quota_*, checkin_*) and the
+// UserUsageStats curve on every row, which our admin UI already consumes.
+func (a *App) managedUsersResponse(r *http.Request) (map[string]any, error) {
+	query, err := parseManagedUsersQuery(r)
+	if err != nil {
+		return nil, err
+	}
+	items := filterManagedUsers(a.managedUsers(), query)
+	query.Total = len(items)
+	query.TotalPages = managedUsersTotalPages(query.Total, query.PageSize)
+	if query.Page > query.TotalPages {
+		query.Page = query.TotalPages
+	}
+	if query.Page < 1 {
+		query.Page = 1
+	}
+	start := (query.Page - 1) * query.PageSize
+	if start < 0 {
+		start = 0
+	}
+	if start > query.Total {
+		start = query.Total
+	}
+	end := start + query.PageSize
+	if end > query.Total {
+		end = query.Total
+	}
+	pageItems := items[start:end]
+	return map[string]any{
+		"items":       pageItems,
+		"total":       query.Total,
+		"page":        query.Page,
+		"page_size":   query.PageSize,
+		"total_pages": query.TotalPages,
+	}, nil
+}
+
+func parseManagedUsersQuery(r *http.Request) (managedUsersQuery, error) {
+	values := r.URL.Query()
+	page, err := parseManagedUsersPage(values.Get("page"))
+	if err != nil {
+		return managedUsersQuery{}, err
+	}
+	pageSize, err := parseManagedUsersPageSize(values.Get("page_size"))
+	if err != nil {
+		return managedUsersQuery{}, err
+	}
+	return managedUsersQuery{
+		Page:     page,
+		PageSize: pageSize,
+		Search:   strings.TrimSpace(values.Get("search")),
+		Provider: strings.TrimSpace(values.Get("provider")),
+		Status:   strings.TrimSpace(values.Get("status")),
+	}, nil
+}
+
+func parseManagedUsersPage(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 1, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		return 0, fmt.Errorf("page 参数无效")
+	}
+	return value, nil
+}
+
+func parseManagedUsersPageSize(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 20, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		return 0, fmt.Errorf("page_size 参数无效")
+	}
+	return normalizedManagedUsersPageSize(value), nil
+}
+
+func normalizedManagedUsersPageSize(value int) int {
+	if value <= 0 {
+		return 20
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func managedUsersTotalPages(total, pageSize int) int {
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	if total <= 0 {
+		return 1
+	}
+	return (total + pageSize - 1) / pageSize
+}
+
+func filterManagedUsers(items []map[string]any, query managedUsersQuery) []map[string]any {
+	out := make([]map[string]any, 0, len(items))
+	search := strings.ToLower(strings.TrimSpace(query.Search))
+	provider := strings.TrimSpace(query.Provider)
+	status := strings.TrimSpace(query.Status)
+	for _, item := range items {
+		if provider != "" && provider != "all" && util.Clean(item["provider"]) != provider {
+			continue
+		}
+		if status == "enabled" && !util.ToBool(item["enabled"]) {
+			continue
+		}
+		if status == "disabled" && util.ToBool(item["enabled"]) {
+			continue
+		}
+		if search != "" && !strings.Contains(managedUserSearchText(item), search) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func managedUserSearchText(item map[string]any) string {
+	parts := []string{
+		util.Clean(item["id"]),
+		util.Clean(item["username"]),
+		util.Clean(item["name"]),
+		util.Clean(item["role_id"]),
+		util.Clean(item["role_name"]),
+		util.Clean(item["owner_id"]),
+		util.Clean(item["owner_name"]),
+		util.Clean(item["provider"]),
+		util.Clean(item["linuxdo_level"]),
+		util.Clean(item["session_id"]),
+		util.Clean(item["session_name"]),
+		util.Clean(item["invite_code"]),
+	}
+	return strings.ToLower(strings.Join(parts, " "))
+}
+
 func findManagedUser(items []map[string]any, id string) map[string]any {
 	for _, item := range items {
 		if item["id"] == id {
@@ -534,6 +795,14 @@ func findManagedUser(items []map[string]any, id string) map[string]any {
 		}
 	}
 	return nil
+}
+
+func pointerFromValue(value any) *int {
+	if util.Clean(value) == "" {
+		return nil
+	}
+	n := util.ToInt(value, 0)
+	return &n
 }
 
 func (a *App) handlePublicAnnouncements(w http.ResponseWriter, r *http.Request) {
@@ -946,7 +1215,14 @@ func (a *App) handleCreationTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api/creation-tasks/image-generations" && r.Method == http.MethodPost {
 		body, _ := readJSONMap(r)
-		task, err := a.tasks.SubmitGenerationWithOptions(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto), util.Clean(body["size"]), util.Clean(body["quality"]), a.resolveImageBaseURL(r), util.ToInt(body["n"], 1), body["messages"], imageTaskRequestMetadata(body), imageOutputOptionsFromBody(body), util.Clean(body["visibility"]))
+		model := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
+		var task map[string]any
+		var err error
+		if shouldRouteGenerationTaskToResponsesImage(model) {
+			task, err = a.tasks.SubmitResponseImageGenerationWithOptions(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), model, util.Clean(body["size"]), util.Clean(body["quality"]), a.resolveImageBaseURL(r), nil, util.ToInt(body["n"], 1), body["messages"], imageTaskRequestMetadata(body), imageOutputOptionsFromBody(body), util.Clean(body["visibility"]))
+		} else {
+			task, err = a.tasks.SubmitGenerationWithOptions(r.Context(), identity, util.Clean(body["client_task_id"]), util.Clean(body["prompt"]), model, util.Clean(body["size"]), util.Clean(body["quality"]), a.resolveImageBaseURL(r), util.ToInt(body["n"], 1), body["messages"], imageTaskRequestMetadata(body), imageOutputOptionsFromBody(body), util.Clean(body["visibility"]))
+		}
 		if err != nil {
 			writeCreationTaskSubmitError(w, err)
 			return
@@ -1066,9 +1342,19 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func shouldRouteGenerationTaskToResponsesImage(model string) bool {
+	switch strings.TrimSpace(model) {
+	case "", util.ImageModelAuto, util.ImageModelGPT, util.ImageModelCodex:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *App) streamRegisterEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
 	last := ""
 	ticker := time.NewTicker(500 * time.Millisecond)

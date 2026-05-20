@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +29,7 @@ type AccountService struct {
 	proxy             *ProxyService
 	logs              *LogService
 	index             int
+	textIndex         int
 	items             []map[string]any
 	imageReservations map[string]int
 	remoteBaseURL     string
@@ -38,7 +40,15 @@ const (
 	defaultRemoteUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 	defaultRemoteSecCHUA   = `"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"`
 	defaultRemoteProfile   = "chrome145"
+
+	accountRefreshTTL             = 90 * time.Second
+	accountRefreshFailureCooldown = 45 * time.Second
+	accountImageFailureCooldown   = 30 * time.Minute
+	accountRefreshHTTPTimeout     = 15 * time.Second
+	accountCandidateBatchSize     = 12
 )
+
+const imageAttemptTimeoutErrorMessage = "image generation attempt timed out"
 
 func NewAccountService(backend storage.Backend, config AccountConfig, proxy *ProxyService, logs *LogService) *AccountService {
 	browserHTTPClient := func(profile string, timeout time.Duration) *http.Client {
@@ -278,12 +288,45 @@ func (s *AccountService) GetAccount(accessToken string) map[string]any {
 }
 
 func (s *AccountService) GetTextAccessToken() string {
+	return s.GetTextAccessTokenExcluding(nil)
+}
+
+func (s *AccountService) GetTextAccessTokenExcluding(excluded map[string]struct{}) string {
+	return s.getTextAccessTokenExcluding(excluded, nil)
+}
+
+func (s *AccountService) GetVisionAccessTokenExcluding(excluded map[string]struct{}) string {
+	return s.getTextAccessTokenExcluding(excluded, IsImageAccountAvailable)
+}
+
+func (s *AccountService) getTextAccessTokenExcluding(excluded map[string]struct{}, allow func(map[string]any) bool) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, item := range s.items {
+	if len(s.items) == 0 {
+		return ""
+	}
+	now := time.Now()
+	start := s.textIndex % len(s.items)
+	for offset := 0; offset < len(s.items); offset++ {
+		idx := (start + offset) % len(s.items)
+		item := s.items[idx]
 		status := util.Clean(item["status"])
+		token := util.Clean(item["access_token"])
+		if token == "" {
+			continue
+		}
+		if _, ok := excluded[token]; ok {
+			continue
+		}
+		if accountCheckCoolingDown(item, now) {
+			continue
+		}
+		if allow != nil && !allow(item) {
+			continue
+		}
 		if status != "禁用" && status != "异常" {
-			return util.Clean(item["access_token"])
+			s.textIndex = (idx + 1) % len(s.items)
+			return token
 		}
 	}
 	return ""
@@ -293,20 +336,36 @@ func (s *AccountService) GetAvailableAccessToken(ctx context.Context) (string, e
 	return s.GetAvailableAccessTokenFor(ctx, nil)
 }
 
+func (s *AccountService) GetAvailableImageAccessToken(ctx context.Context, preferPaid bool) (string, error) {
+	return s.getAvailableAccessTokenFor(ctx, nil, preferPaid)
+}
+
 func (s *AccountService) GetAvailableAccessTokenFor(ctx context.Context, allow func(map[string]any) bool) (string, error) {
-	attempted := map[string]struct{}{}
-	for {
-		reservation, err := s.reserveNextCandidateToken(attempted, allow)
-		if err != nil {
-			return "", err
-		}
-		attempted[reservation.token] = struct{}{}
-		account := s.RefreshAccountState(ctx, reservation.token)
-		if account != nil && (allow == nil || allow(account)) && s.reservedImageSlotAvailable(reservation) {
-			return reservation.token, nil
-		}
-		s.releaseImageReservation(reservation.token)
+	return s.getAvailableAccessTokenFor(ctx, allow, false)
+}
+
+func (s *AccountService) getAvailableAccessTokenFor(ctx context.Context, allow func(map[string]any) bool, preferPaid bool) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
 	}
+	reservations, err := s.reserveCandidateBatchWithPreference(nil, allow, accountCandidateBatchSize, preferPaid)
+	if err != nil {
+		return "", err
+	}
+	selected := ""
+	for _, reservation := range reservations {
+		if s.reservedImageSlotAvailable(reservation) {
+			selected = reservation.token
+			break
+		}
+	}
+	s.releaseImageReservationsExcept(reservations, selected)
+	if selected == "" {
+		return "", fmt.Errorf("no available image quota")
+	}
+	return selected, nil
 }
 
 func (s *AccountService) HasAvailableAccount() bool {
@@ -323,11 +382,19 @@ func (s *AccountService) HasAvailableAccount() bool {
 func (s *AccountService) RefreshAccountState(ctx context.Context, accessToken string) map[string]any {
 	remote, err := s.FetchRemoteInfo(ctx, accessToken)
 	if err != nil {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
 		if _, handled := s.ApplyAccountError(accessToken, "refresh_account_state", err); handled {
 			return s.GetAccount(accessToken)
 		}
+		s.markAccountCheckFailure(accessToken, err)
 		return nil
 	}
+	remote["checked_at"] = util.NowISO()
+	remote["check_error"] = nil
+	remote["check_failed_at"] = nil
+	remote["check_cooldown_until"] = nil
 	return s.UpdateAccount(accessToken, remote)
 }
 
@@ -342,8 +409,8 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 		err   error
 	}
 	workers := len(tokens)
-	if workers > 10 {
-		workers = 10
+	if workers > 20 {
+		workers = 20
 	}
 	jobs := make(chan string)
 	results := make(chan result, len(tokens))
@@ -367,6 +434,7 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 		close(results)
 	}()
 	refreshed := 0
+	removed := 0
 	errors := []map[string]string{}
 	for res := range results {
 		if res.err == nil {
@@ -378,10 +446,13 @@ func (s *AccountService) RefreshAccounts(ctx context.Context, accessTokens []str
 		message := res.err.Error()
 		if normalized, handled := s.ApplyAccountError(res.token, "refresh_accounts", res.err); handled {
 			message = normalized
+		} else {
+			s.markAccountCheckFailure(res.token, res.err)
 		}
+		s.recordHeartbeatFailure(res.token, "refresh_accounts")
 		errors = append(errors, map[string]string{"access_token": res.token, "error": message})
 	}
-	return map[string]any{"refreshed": refreshed, "errors": errors, "items": s.ListAccounts()}
+	return map[string]any{"refreshed": refreshed, "removed": removed, "errors": errors, "items": s.ListAccounts()}
 }
 
 func (s *AccountService) MarkImageResult(accessToken string, success bool) map[string]any {
@@ -401,6 +472,10 @@ func (s *AccountService) MarkImageResult(accessToken string, success bool) map[s
 	unknown := util.ToBool(next["image_quota_unknown"])
 	if success {
 		next["success"] = util.ToInt(next["success"], 0) + 1
+		next["checked_at"] = util.NowISO()
+		next["check_error"] = nil
+		next["check_failed_at"] = nil
+		next["check_cooldown_until"] = nil
 		if !unknown {
 			quota := util.ToInt(next["quota"], 0) - 1
 			if quota < 0 {
@@ -439,6 +514,15 @@ func (s *AccountService) MarkImageResult(accessToken string, success bool) map[s
 	return util.CopyMap(account)
 }
 
+func (s *AccountService) ReleaseImageSlot(accessToken string) {
+	s.releaseImageReservation(accessToken)
+}
+
+func (s *AccountService) MarkImageAttemptTimeout(accessToken string) {
+	s.MarkImageResult(accessToken, false)
+	s.markAccountCooldown(accessToken, imageAttemptTimeoutErrorMessage, accountRefreshFailureCooldown)
+}
+
 func (s *AccountService) RemoveInvalidToken(accessToken, event string) bool {
 	if !s.config.AutoRemoveInvalidAccounts() {
 		return false
@@ -464,7 +548,7 @@ func (s *AccountService) ApplyAccountError(accessToken, event string, err error)
 
 func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message string) (string, bool) {
 	if IsAccountInvalidErrorMessage(message) {
-		if !s.RemoveInvalidToken(accessToken, event) {
+		if isHeartbeatRefreshEvent(event) || !s.RemoveInvalidToken(accessToken, event) {
 			s.UpdateAccount(accessToken, map[string]any{"status": "异常", "quota": 0, "image_quota_unknown": false})
 		}
 		return "检测到封号", true
@@ -473,7 +557,81 @@ func (s *AccountService) ApplyAccountErrorMessage(accessToken, event, message st
 		s.UpdateAccount(accessToken, map[string]any{"status": "限流", "quota": 0, "image_quota_unknown": false})
 		return "检测到限流", true
 	}
+	if event == "image_stream" && isBootstrapTransportErrorMessage(message) {
+		s.markAccountCooldown(accessToken, message, accountErrorCooldownDuration(message))
+		if detail, ok := util.SummarizeUpstreamConnectionError(message); ok {
+			return detail, true
+		}
+		return "检测到临时网络异常，账号已短暂冷却", true
+	}
+	if accountShouldCooldownOnErrorMessage(message) {
+		s.markAccountCooldown(accessToken, message, accountErrorCooldownDuration(message))
+		if detail, ok := util.SummarizeCloudflareError(message); ok {
+			return detail, true
+		}
+		if detail, ok := util.SummarizeUpstreamConnectionError(message); ok {
+			return detail, true
+		}
+		return "检测到临时网络异常，账号已短暂冷却", true
+	}
 	return message, false
+}
+
+func (s *AccountService) markAccountCheckFailure(accessToken string, err error) {
+	accessToken = util.Clean(accessToken)
+	if accessToken == "" || err == nil {
+		return
+	}
+	s.markAccountCooldown(accessToken, err.Error(), accountRefreshFailureCooldown)
+}
+
+func (s *AccountService) recordHeartbeatFailure(accessToken, event string) bool {
+	account := s.GetAccount(accessToken)
+	if util.Clean(account["check_error"]) == "" {
+		return false
+	}
+	s.logs.Add("账号心跳失败，已标记冷却", map[string]any{
+		"module":         "accounts",
+		"operation_type": "心跳失败",
+		"source":         event,
+		"token":          util.AnonymizeToken(accessToken),
+		"error":          util.Clean(account["check_error"]),
+	})
+	return true
+}
+
+func isHeartbeatRefreshEvent(event string) bool {
+	switch event {
+	case "refresh_accounts", "refresh_account_state":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *AccountService) markAccountCooldown(accessToken, message string, duration time.Duration) {
+	accessToken = util.Clean(accessToken)
+	if accessToken == "" {
+		return
+	}
+	if duration <= 0 {
+		duration = accountRefreshFailureCooldown
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := s.findIndexLocked(accessToken)
+	if idx < 0 {
+		return
+	}
+	next := util.CopyMap(s.items[idx])
+	next["check_error"] = message
+	next["check_failed_at"] = now.Format(time.RFC3339Nano)
+	next["check_cooldown_until"] = now.Add(duration).Format(time.RFC3339Nano)
+	if normalized := normalizeAccount(next); normalized != nil {
+		s.items[idx] = normalized
+		_ = s.saveLocked()
+	}
 }
 
 func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string) (map[string]any, error) {
@@ -483,9 +641,9 @@ func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string
 	}
 	baseURL := strings.TrimRight(firstNonEmpty(s.remoteBaseURL, "https://chatgpt.com"), "/")
 	headers := s.remoteHeaders(accessToken)
-	client := s.browserHTTPClient(s.remoteImpersonation(accessToken), 30*time.Second)
+	client := s.browserHTTPClient(s.remoteImpersonation(accessToken), accountRefreshHTTPTimeout)
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = &http.Client{Timeout: accountRefreshHTTPTimeout}
 	}
 	if err := s.bootstrapRemote(ctx, client, baseURL, accessToken); err != nil {
 		return nil, err
@@ -548,15 +706,19 @@ func (s *AccountService) FetchRemoteInfo(ctx context.Context, accessToken string
 		status = "限流"
 	}
 	return map[string]any{
-		"email":               me.payload["email"],
-		"user_id":             me.payload["id"],
-		"type":                accountType,
-		"quota":               quota,
-		"image_quota_unknown": unknown,
-		"limits_progress":     limits,
-		"default_model_slug":  init.payload["default_model_slug"],
-		"restore_at":          restoreAt,
-		"status":              status,
+		"email":                me.payload["email"],
+		"user_id":              me.payload["id"],
+		"type":                 accountType,
+		"quota":                quota,
+		"image_quota_unknown":  unknown,
+		"limits_progress":      limits,
+		"default_model_slug":   init.payload["default_model_slug"],
+		"restore_at":           restoreAt,
+		"status":               status,
+		"checked_at":           util.NowISO(),
+		"check_error":          nil,
+		"check_failed_at":      nil,
+		"check_cooldown_until": nil,
 	}, nil
 }
 
@@ -604,6 +766,150 @@ type imageTokenReservation struct {
 	slot  int
 }
 
+type imageAccountCandidate struct {
+	token string
+	score int
+	paid  bool
+}
+
+const imageAccountScoreRoundRobinWindow = 150
+
+func (s *AccountService) reserveCandidateBatch(excluded map[string]struct{}, allow func(map[string]any) bool, limit int) ([]imageTokenReservation, error) {
+	return s.reserveCandidateBatchWithPreference(excluded, allow, limit, false)
+}
+
+func (s *AccountService) reserveCandidateBatchWithPreference(excluded map[string]struct{}, allow func(map[string]any) bool, limit int, preferPaid bool) ([]imageTokenReservation, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var candidates []imageAccountCandidate
+	for _, item := range s.items {
+		token := util.Clean(item["access_token"])
+		if token == "" {
+			continue
+		}
+		if _, ok := excluded[token]; ok {
+			continue
+		}
+		if !IsImageAccountAvailable(item) {
+			continue
+		}
+		if allow != nil && !allow(item) {
+			continue
+		}
+		if s.availableImageSlotsLocked(item) > 0 {
+			score := imageAccountHealthScore(item)
+			candidates = append(candidates, imageAccountCandidate{token: token, score: score, paid: IsPaidImageAccount(item)})
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no available image quota")
+	}
+	start := s.index % len(candidates)
+	if start > 0 {
+		candidates = append(candidates[start:], candidates[:start]...)
+	}
+	candidates = imageAccountHealthyRoundRobinPool(candidates)
+	if preferPaid {
+		candidates = preferPaidCandidates(candidates)
+	}
+	if limit > len(candidates) {
+		limit = len(candidates)
+	}
+	s.ensureImageReservationsLocked()
+	reservations := make([]imageTokenReservation, 0, limit)
+	for offset := 0; offset < limit; offset++ {
+		token := candidates[offset].token
+		s.imageReservations[token]++
+		reservations = append(reservations, imageTokenReservation{token: token, slot: s.imageReservations[token]})
+	}
+	// Advance by one leader, not by the whole batch. Otherwise candidate counts that
+	// divide the batch size (for example 2 or 3 paid image accounts) keep selecting
+	// the same first account forever.
+	s.index = start + 1
+	return reservations, nil
+}
+
+func imageAccountHealthyRoundRobinPool(candidates []imageAccountCandidate) []imageAccountCandidate {
+	if len(candidates) == 0 {
+		return candidates
+	}
+	best := candidates[0].score
+	for _, candidate := range candidates[1:] {
+		if candidate.score < best {
+			best = candidate.score
+		}
+	}
+	threshold := best + imageAccountScoreRoundRobinWindow
+	pool := make([]imageAccountCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.score <= threshold {
+			pool = append(pool, candidate)
+		}
+	}
+	if len(pool) == 0 {
+		return candidates
+	}
+	return pool
+}
+
+func preferPaidCandidates(candidates []imageAccountCandidate) []imageAccountCandidate {
+	if len(candidates) == 0 {
+		return candidates
+	}
+	paid := make([]imageAccountCandidate, 0, len(candidates))
+	other := make([]imageAccountCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.paid {
+			paid = append(paid, candidate)
+		} else {
+			other = append(other, candidate)
+		}
+	}
+	if len(paid) == 0 {
+		return candidates
+	}
+	return append(paid, other...)
+}
+
+func imageAccountHealthScore(account map[string]any) int {
+	success := util.ToInt(account["success"], 0)
+	fail := util.ToInt(account["fail"], 0)
+	total := success + fail
+	score := 100
+	if total > 0 {
+		score = fail * 1000 / total
+		if success > 0 && fail == 0 {
+			score -= 20
+		}
+	}
+	if fail >= success && fail >= 10 {
+		score += 500
+	}
+	if fail > 0 && success == 0 {
+		score += 300
+	}
+	if util.ToBool(account["image_quota_unknown"]) {
+		score += 25
+	}
+	if usedAt, ok := parseAccountTime(account["last_used_at"]); ok {
+		age := time.Since(usedAt)
+		switch {
+		case age < 0:
+			score += 250
+		case age < 30*time.Second:
+			score += 250
+		case age < 2*time.Minute:
+			score += 150
+		case age < 10*time.Minute:
+			score += 50
+		}
+	}
+	return score
+}
+
 func (s *AccountService) reserveNextCandidateToken(excluded map[string]struct{}, allow func(map[string]any) bool) (imageTokenReservation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -614,6 +920,9 @@ func (s *AccountService) reserveNextCandidateToken(excluded map[string]struct{},
 			continue
 		}
 		if _, ok := excluded[token]; ok {
+			continue
+		}
+		if !IsImageAccountAvailable(item) {
 			continue
 		}
 		if allow != nil && !allow(item) {
@@ -631,6 +940,15 @@ func (s *AccountService) reserveNextCandidateToken(excluded map[string]struct{},
 	s.ensureImageReservationsLocked()
 	s.imageReservations[token]++
 	return imageTokenReservation{token: token, slot: s.imageReservations[token]}, nil
+}
+
+func (s *AccountService) releaseImageReservationsExcept(reservations []imageTokenReservation, keepToken string) {
+	for _, reservation := range reservations {
+		if keepToken != "" && reservation.token == keepToken {
+			continue
+		}
+		s.releaseImageReservation(reservation.token)
+	}
 }
 
 func (s *AccountService) reservedImageSlotAvailable(reservation imageTokenReservation) bool {
@@ -689,10 +1007,10 @@ func imageAccountCapacity(account map[string]any) int {
 	if !IsImageAccountAvailable(account) {
 		return 0
 	}
-	if util.ToBool(account["image_quota_unknown"]) {
-		return 1
-	}
-	return util.ToInt(account["quota"], 0)
+	// Quota is the remaining total allowance, not a safe per-account concurrency
+	// limit. Reusing one token for parallel image workers makes failures cluster on
+	// the same account and starves the rest of the pool.
+	return 1
 }
 
 func (s *AccountService) findIndexLocked(accessToken string) int {
@@ -821,6 +1139,9 @@ func IsImageAccountAvailable(account map[string]any) bool {
 	if account == nil {
 		return false
 	}
+	if accountCheckCoolingDown(account, time.Now()) {
+		return false
+	}
 	status := util.Clean(account["status"])
 	if status == "禁用" || status == "限流" || status == "异常" {
 		return false
@@ -829,6 +1150,81 @@ func IsImageAccountAvailable(account map[string]any) bool {
 		return true
 	}
 	return util.ToInt(account["quota"], 0) > 0
+}
+
+func accountRefreshFresh(account map[string]any, now time.Time) bool {
+	if account == nil || accountCheckCoolingDown(account, now) {
+		return false
+	}
+	checkedAt, ok := parseAccountTime(account["checked_at"])
+	if !ok {
+		return false
+	}
+	if checkedAt.After(now.Add(5 * time.Second)) {
+		return false
+	}
+	return now.Sub(checkedAt) <= accountRefreshTTL
+}
+
+func accountCheckCoolingDown(account map[string]any, now time.Time) bool {
+	if account == nil {
+		return false
+	}
+	until, ok := parseAccountTime(account["check_cooldown_until"])
+	return ok && until.After(now)
+}
+
+func accountShouldCooldownOnErrorMessage(message string) bool {
+	text := strings.TrimSpace(message)
+	if text == "" || isBootstrapErrorMessage(text) || IsAccountInvalidErrorMessage(text) || IsAccountRateLimitedErrorMessage(text) {
+		return false
+	}
+	lower := strings.ToLower(text)
+	if _, ok := util.SummarizeUpstreamConnectionError(text); ok {
+		return true
+	}
+	if _, ok := util.SummarizeCloudflareError(text); ok {
+		return true
+	}
+	return strings.Contains(lower, "cloudflare challenge") ||
+		strings.Contains(lower, "cf_chl") ||
+		strings.Contains(lower, "challenge-platform") ||
+		strings.Contains(lower, "enable javascript and cookies to continue") ||
+		strings.Contains(lower, "upstream returned html error page") ||
+		strings.Contains(lower, imageAttemptTimeoutErrorMessage) ||
+		strings.Contains(lower, "tool choice 'required' must be specified with 'tools' parameter") ||
+		strings.Contains(lower, "tool choice 'image_generation' not found in 'tools' parameter") ||
+		strings.Contains(lower, "image generation produced no image result") ||
+		strings.Contains(lower, "connection reset by peer") ||
+		strings.Contains(lower, "unexpected eof")
+}
+
+func accountErrorCooldownDuration(message string) time.Duration {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	if strings.Contains(lower, "image generation produced no image result") {
+		return accountImageFailureCooldown
+	}
+	if _, ok := util.SummarizeCloudflareError(message); ok {
+		return accountImageFailureCooldown
+	}
+	return accountRefreshFailureCooldown
+}
+
+func parseAccountTime(value any) (time.Time, bool) {
+	text := util.Clean(value)
+	if text == "" {
+		return time.Time{}, false
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, text); err == nil {
+		return parsed, true
+	}
+	if parsed, err := time.Parse(time.RFC3339, text); err == nil {
+		return parsed, true
+	}
+	if parsed, err := time.ParseInLocation("2006-01-02 15:04:05", text, time.Local); err == nil {
+		return parsed, true
+	}
+	return time.Time{}, false
 }
 
 func IsPaidImageAccount(account map[string]any) bool {
@@ -847,8 +1243,16 @@ func IsAccountInvalidErrorMessage(message string) bool {
 	}
 	return strings.Contains(text, "token_invalidated") ||
 		strings.Contains(text, "token_revoked") ||
+		strings.Contains(text, "token_expired") ||
+		strings.Contains(text, "expired_access_token") ||
 		strings.Contains(text, "authentication token has been invalidated") ||
 		strings.Contains(text, "invalidated oauth token") ||
+		strings.Contains(text, "access token expired") ||
+		strings.Contains(text, "oauth token expired") ||
+		strings.Contains(text, "expired oauth token") ||
+		strings.Contains(text, "jwt expired") ||
+		strings.Contains(text, "token has expired") ||
+		strings.Contains(text, "bearer token expired") ||
 		hasAccountHTTPStatus(text, http.StatusUnauthorized)
 }
 
@@ -917,6 +1321,13 @@ func normalizeAccount(item map[string]any) map[string]any {
 	} else {
 		normalized["restore_at"] = nil
 	}
+	for _, key := range []string{"checked_at", "check_failed_at", "check_cooldown_until", "check_error"} {
+		if value := util.Clean(normalized[key]); value != "" {
+			normalized[key] = value
+		} else {
+			normalized[key] = nil
+		}
+	}
 	normalized["success"] = util.ToInt(normalized["success"], 0)
 	normalized["fail"] = util.ToInt(normalized["fail"], 0)
 	return normalized
@@ -942,6 +1353,10 @@ func publicAccounts(accounts []map[string]any) []map[string]any {
 			"limits_progress":    util.ValueOr(account["limits_progress"], []any{}),
 			"default_model_slug": account["default_model_slug"],
 			"restoreAt":          account["restore_at"],
+			"checkedAt":          account["checked_at"],
+			"checkFailedAt":      account["check_failed_at"],
+			"checkCooldownUntil": account["check_cooldown_until"],
+			"checkError":         account["check_error"],
 			"success":            util.ToInt(account["success"], 0),
 			"fail":               util.ToInt(account["fail"], 0),
 			"lastUsedAt":         account["last_used_at"],
@@ -1113,6 +1528,17 @@ func isBootstrapErrorMessage(message string) bool {
 	return strings.HasPrefix(strings.TrimSpace(message), "bootstrap failed")
 }
 
+func isBootstrapTransportErrorMessage(message string) bool {
+	text := strings.TrimSpace(message)
+	if !isBootstrapErrorMessage(text) {
+		return false
+	}
+	if _, ok := util.SummarizeUpstreamConnectionError(text); ok {
+		return true
+	}
+	return false
+}
+
 func refreshHTTPError(context string, status int, body []byte) error {
 	detail := summarizeRefreshErrorBody(body)
 	if detail == "" {
@@ -1131,7 +1557,10 @@ func summarizeRefreshErrorBody(body []byte) string {
 		strings.Contains(lower, "challenge-platform") ||
 		strings.Contains(lower, "enable javascript and cookies to continue") ||
 		strings.Contains(lower, "cloudflare") {
-		return "upstream returned Cloudflare challenge page; refresh browser fingerprint/session or change proxy"
+		if detail, ok := util.SummarizeCloudflareError(text); ok {
+			return detail
+		}
+		return util.UpstreamCloudflareChallengeMessage
 	}
 	if strings.Contains(lower, "<html") || strings.Contains(lower, "<!doctype html") || strings.Contains(lower, "<body") {
 		return "upstream returned HTML error page"

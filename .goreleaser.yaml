@@ -4,7 +4,7 @@ project_name: chatgpt2api
 
 builds:
   - id: chatgpt2api
-    main: ./cmd/chatgpt2api
+    main: ./internal
     binary: chatgpt2api
     flags:
       - -tags=embed
@@ -30,7 +30,7 @@ archives:
     files:
       - README.md
       - .env.example
-      - docker-compose.yml
+      - deploy/docker-compose.yml
 
 checksum:
   name_template: checksums.txt
@@ -46,7 +46,7 @@ dockers:
     skip_push: '{{ if eq .Env.DOCKERHUB_USERNAME "skip" }}true{{ else }}false{{ end }}'
     image_templates:
       - "{{ .Env.DOCKERHUB_USERNAME }}/chatgpt2api:{{ .Version }}-amd64"
-    dockerfile: Dockerfile.goreleaser
+    dockerfile: deploy/Dockerfile.release
     use: buildx
     build_flag_templates:
       - "--platform=linux/amd64"
@@ -59,7 +59,7 @@ dockers:
     skip_push: '{{ if eq .Env.DOCKERHUB_USERNAME "skip" }}true{{ else }}false{{ end }}'
     image_templates:
       - "{{ .Env.DOCKERHUB_USERNAME }}/chatgpt2api:{{ .Version }}-arm64"
-    dockerfile: Dockerfile.goreleaser
+    dockerfile: deploy/Dockerfile.release
     use: buildx
     build_flag_templates:
       - "--platform=linux/arm64"
@@ -71,7 +71,7 @@ dockers:
     goarch: amd64
     image_templates:
       - "ghcr.io/{{ .Env.GITHUB_REPO_OWNER_LOWER }}/chatgpt2api:{{ .Version }}-amd64"
-    dockerfile: Dockerfile.goreleaser
+    dockerfile: deploy/Dockerfile.release
     use: buildx
     build_flag_templates:
       - "--platform=linux/amd64"
@@ -84,7 +84,7 @@ dockers:
     goarch: arm64
     image_templates:
       - "ghcr.io/{{ .Env.GITHUB_REPO_OWNER_LOWER }}/chatgpt2api:{{ .Version }}-arm64"
-    dockerfile: Dockerfile.goreleaser
+    dockerfile: deploy/Dockerfile.release
     use: buildx
     build_flag_templates:
       - "--platform=linux/arm64"

@@ -10,18 +10,12 @@ on:
         description: "Tag to release, for example v1.0.0"
         required: true
         type: string
-      simple_release:
-        description: "Only publish linux/amd64 GHCR image"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
   packages: write
 
 env:
-  SIMPLE_RELEASE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.simple_release || 'false' }}
   DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
 
 jobs:
@@ -129,7 +123,7 @@ jobs:
         uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
-          args: release --clean --skip=validate ${{ env.SIMPLE_RELEASE == 'true' && '--config=.goreleaser.simple.yaml' || '' }}
+          args: release --clean --skip=validate
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_MESSAGE: ${{ steps.meta.outputs.body }}

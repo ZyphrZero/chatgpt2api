@@ -78,11 +78,11 @@ export function ProxySettingsCard() {
                   setProxy(event.target.value);
                   setTestResult(null);
                 }}
-                placeholder="http://user:pass@127.0.0.1:7890"
+                placeholder="留空则不使用代理，仅手动填写后生效"
                 className="h-11 rounded-xl border-stone-200 bg-white"
               />
               <p className="text-sm text-stone-500">
-                留空表示不使用代理。请按完整地址填写，例如 `http://127.0.0.1:7890`、`http://用户名:密码@127.0.0.1:7890` 或 `socks5://127.0.0.1:7890`。
+                留空表示不使用代理。只有保存了完整代理地址后，系统出站请求才会使用代理。
               </p>
             </div>
 

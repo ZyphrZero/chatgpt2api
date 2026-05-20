@@ -116,6 +116,7 @@ export function PermissionEditor({
               >
                 <Checkbox
                   checked={selectedMenuPaths.includes(item.path)}
+                  aria-label={`切换菜单权限 ${item.label}`}
                   onCheckedChange={(checked) =>
                     onMenuPathsChange(toggleListValue(selectedMenuPaths, item.path, Boolean(checked)))
                   }
@@ -175,6 +176,7 @@ export function PermissionEditor({
                     >
                       <Checkbox
                         checked={selectedApiPermissions.includes(permission.key)}
+                        aria-label={`切换 API 权限 ${permission.method} ${permission.path}`}
                         onCheckedChange={(checked) =>
                           onApiPermissionsChange(
                             toggleListValue(selectedApiPermissions, permission.key, Boolean(checked)),

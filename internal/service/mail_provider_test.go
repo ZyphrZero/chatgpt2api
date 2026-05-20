@@ -92,3 +92,69 @@ func TestRegisterMoEmailProviderCreatesAndReadsMailbox(t *testing.T) {
 		t.Fatalf("message metadata = %#v", message)
 	}
 }
+
+func TestRegisterMailtempEduProviderCreatesAndReadsMailbox(t *testing.T) {
+	var createPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/domains":
+			_, _ = w.Write([]byte(`{"status":"success","domains":[{"id":13,"domain":"mailtemp.edu.pl"},{"id":14,"domain":"imail.edu.vn"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/create-session":
+			if err := json.NewDecoder(r.Body).Decode(&createPayload); err != nil {
+				t.Errorf("decode create payload: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"status":"success","email":"student@mailtemp.edu.pl","token":"session-token","expires_at":"2036-05-09 16:03:53"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/check-mail":
+			if r.URL.Query().Get("token") != "session-token" {
+				t.Errorf("check-mail token = %q", r.URL.Query().Get("token"))
+			}
+			_, _ = w.Write([]byte(`{"status":"success","messages":[{"id":105,"sender_email":"noreply@example.test","subject":"Verify","received_at":"2026-05-12 16:00:00"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/read-mail":
+			if r.URL.Query().Get("token") != "session-token" || r.URL.Query().Get("id") != "105" {
+				t.Errorf("read-mail query = %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"status":"success","message":{"id":105,"sender_email":"noreply@example.test","subject":"Verify","body_text":"Verification code: 654321","received_at":"2026-05-12 16:00:00"}}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	provider, err := createRegisterMailProvider(map[string]any{
+		"request_timeout": 1,
+		"providers": []map[string]any{{
+			"type":     "mailtemp_edu",
+			"enable":   true,
+			"api_base": server.URL + "/api",
+			"domain":   []string{"mailtemp.edu.pl"},
+		}},
+	}, "", "")
+	if err != nil {
+		t.Fatalf("createRegisterMailProvider() error = %v", err)
+	}
+	defer provider.Close()
+
+	mailbox, err := provider.CreateMailbox("student")
+	if err != nil {
+		t.Fatalf("CreateMailbox() error = %v", err)
+	}
+	if mailbox["provider"] != "mailtemp_edu" || mailbox["address"] != "student@mailtemp.edu.pl" || mailbox["token"] != "session-token" {
+		t.Fatalf("mailbox = %#v", mailbox)
+	}
+	if createPayload["prefix"] != "student" || int(createPayload["domain_id"].(float64)) != 13 {
+		t.Fatalf("create payload = %#v", createPayload)
+	}
+
+	message, err := provider.FetchLatestMessage(mailbox)
+	if err != nil {
+		t.Fatalf("FetchLatestMessage() error = %v", err)
+	}
+	if got := extractRegisterMailCode(message); got != "654321" {
+		t.Fatalf("extractRegisterMailCode() = %q, want 654321; message=%#v", got, message)
+	}
+	if message["message_id"] != "105" || message["sender"] != "noreply@example.test" {
+		t.Fatalf("message metadata = %#v", message)
+	}
+}

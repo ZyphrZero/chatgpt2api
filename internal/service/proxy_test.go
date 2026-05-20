@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 )
@@ -49,6 +50,32 @@ func TestBrowserHTTPClientKeepsSessionAndTimeout(t *testing.T) {
 	}
 	if client.Timeout != 2*time.Second {
 		t.Fatalf("Timeout = %s, want %s", client.Timeout, 2*time.Second)
+	}
+}
+
+func TestHTTPClientForProxyIgnoresEnvironmentWhenProxyEmpty(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	t.Setenv("ALL_PROXY", "http://127.0.0.1:1")
+	t.Setenv("NO_PROXY", "")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := HTTPClientForProxy("", 2*time.Second)
+	resp, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatalf("HTTPClientForProxy(\"\") should ignore proxy environment: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	if got := os.Getenv("HTTP_PROXY"); got == "" {
+		t.Fatal("test setup lost HTTP_PROXY")
 	}
 }
 

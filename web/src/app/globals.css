@@ -100,24 +100,24 @@
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: #090806;
+  --foreground: #f5e6bf;
+  --card: #10100d;
+  --card-foreground: #f5e6bf;
+  --popover: #10100d;
+  --popover-foreground: #f5e6bf;
+  --primary: #d6aa56;
+  --primary-foreground: #100b04;
+  --secondary: #21180d;
+  --secondary-foreground: #ffcf73;
+  --muted: #18140d;
+  --muted-foreground: #b49a62;
+  --accent: #21180d;
+  --accent-foreground: #ffcf73;
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --border: rgb(214 170 86 / 0.26);
+  --input: rgb(214 170 86 / 0.22);
+  --ring: #d6aa56;
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
@@ -145,6 +145,18 @@
     @apply bg-background font-sans text-foreground antialiased;
     background-image: linear-gradient(180deg, #f8fbff 0%, var(--background) 42%, #f2f6fb 100%);
     line-height: 1.5;
+  }
+  html.share-page-root,
+  body.share-page-root {
+    min-height: 100vh;
+    background: #f8fbff !important;
+    background-image: none !important;
+  }
+  /* Radix locks body scroll by adding margin-right equal to the scrollbar width to keep
+     the layout stable. With our scrollbar-gutter: stable + overflow-y: scroll setup that
+     extra margin causes a visible jump when dialogs / image lightboxes open. */
+  body[data-scroll-locked] {
+    margin-right: 0 !important;
   }
   button:not(:disabled),
   [role="button"]:not(:disabled) {
@@ -211,12 +223,12 @@
   .dark .bg-white\/80,
   .dark .bg-white\/92,
   .dark .bg-white\/95 {
-    background-color: oklch(0.205 0 0 / 88%) !important;
+    background-color: rgb(16 16 13 / 88%) !important;
   }
 
   .dark .bg-white\/16,
   .dark .bg-white\/18 {
-    background-color: oklch(0.205 0 0 / 68%) !important;
+    background-color: rgb(33 24 13 / 68%) !important;
   }
 
   .dark .bg-\[\#f0f0f0\],
@@ -232,18 +244,18 @@
   .dark .bg-\[\#edf4ff\],
   .dark .bg-blue-50,
   .dark .bg-sky-50 {
-    background-color: oklch(0.35 0.09 260 / 35%) !important;
+    background-color: rgb(33 24 13 / 82%) !important;
   }
 
   .dark .bg-emerald-50 {
-    background-color: oklch(0.36 0.08 155 / 32%) !important;
+    background-color: rgb(28 37 21 / 74%) !important;
   }
 
   .dark .bg-amber-50,
   .dark .bg-amber-50\/90,
   .dark .bg-amber-50\/95,
   .dark .bg-amber-100 {
-    background-color: oklch(0.38 0.08 80 / 34%) !important;
+    background-color: rgb(33 24 13 / 82%) !important;
   }
 
   .dark .bg-rose-50 {
@@ -261,7 +273,7 @@
   .dark .border-stone-200\/80,
   .dark .border-stone-300,
   .dark .border-white\/80 {
-    border-color: var(--border) !important;
+    border-color: rgb(214 170 86 / 26%) !important;
   }
 
   .dark .border-amber-100,
@@ -294,7 +306,7 @@
   .dark .text-stone-800,
   .dark .text-stone-900,
   .dark .text-stone-950 {
-    color: var(--foreground) !important;
+    color: #f5e6bf !important;
   }
 
   .dark .text-\[\#45515e\],
@@ -303,12 +315,12 @@
   .dark .text-stone-400,
   .dark .text-stone-500,
   .dark .text-stone-600 {
-    color: var(--muted-foreground) !important;
+    color: #b49a62 !important;
   }
 
   .dark .text-\[\#1456f0\],
   .dark .text-blue-600 {
-    color: oklch(0.74 0.16 250) !important;
+    color: #ffcf73 !important;
   }
 
   .dark .text-sky-300,
@@ -326,7 +338,7 @@
   .dark .text-amber-700,
   .dark .text-amber-800,
   .dark .text-amber-900 {
-    color: oklch(0.82 0.14 80) !important;
+    color: #ffcf73 !important;
   }
 
   .dark .text-rose-500,

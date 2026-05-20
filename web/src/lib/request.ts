@@ -36,11 +36,11 @@ const request = axios.create({
 request.interceptors.request.use(async (config) => {
     const nextConfig = {...config};
     const sessionToken = await getStoredSessionToken();
-    const headers = {...(nextConfig.headers || {})} as Record<string, string>;
+    const headers = {...nextConfig.headers} as Record<string, string>;
     if (sessionToken && !headers.Authorization) {
         headers.Authorization = `Bearer ${sessionToken}`;
     }
-    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // oxlint-disable-next-line typescript/ban-ts-comment
     // @ts-expect-error
     nextConfig.headers = headers;
     return nextConfig;

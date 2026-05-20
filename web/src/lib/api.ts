@@ -136,6 +136,10 @@ export type Account = {
   }>;
   default_model_slug?: string | null;
   restoreAt?: string | null;
+  checkedAt?: string | null;
+  checkFailedAt?: string | null;
+  checkCooldownUntil?: string | null;
+  checkError?: string | null;
   success: number;
   fail: number;
   lastUsedAt: string | null;
@@ -161,6 +165,7 @@ type AccountMutationResponse = {
 type AccountRefreshResponse = {
   items: Account[];
   refreshed: number;
+  removed?: number;
   errors: Array<{ access_token?: string; account_id?: string; error: string }>;
 };
 
@@ -173,6 +178,13 @@ export type SettingsConfig = {
   proxy: string;
   base_url?: string;
   registration_enabled?: boolean;
+  user_free_quota?: number | string;
+  invite_reward_quota?: number | string;
+  invitee_bonus_quota?: number | string;
+  turnstile_enabled?: boolean;
+  turnstile_site_key?: string;
+  turnstile_secret_key?: string;
+  turnstile_secret_configured?: boolean;
   refresh_account_interval_minute?: number | string;
   image_concurrent_limit?: number | string;
   image_task_timeout_seconds?: number | string;
@@ -189,6 +201,21 @@ export type SettingsConfig = {
   linuxdo_client_secret_configured?: boolean;
   linuxdo_redirect_url?: string;
   linuxdo_frontend_redirect_url?: string;
+  qq_enabled?: boolean;
+  qq_client_id?: string;
+  qq_client_secret?: string;
+  qq_client_secret_configured?: boolean;
+  qq_redirect_url?: string;
+  qq_frontend_redirect_url?: string;
+  social_login_base_url?: string;
+  social_login_app_id?: string;
+  social_login_app_key?: string;
+  social_login_app_key_configured?: boolean;
+  social_login_redirect_url?: string;
+  social_login_frontend_redirect_url?: string;
+  social_login_qq_enabled?: boolean;
+  social_login_wx_enabled?: boolean;
+  social_login_douyin_enabled?: boolean;
   update_repo?: string;
   update_github_token?: string;
   update_github_token_configured?: boolean;
@@ -206,6 +233,66 @@ export type LoginPageImageSettings = {
   login_page_image_zoom: number;
   login_page_image_position_x: number;
   login_page_image_position_y: number;
+};
+
+export type SubscriptionPlan = {
+  id: string;
+  name: string;
+  description?: string;
+  price: string;
+  quota: number;
+  enabled: boolean;
+  recommended?: boolean;
+};
+
+export type SubscriptionPaymentConfig = {
+  enabled: boolean;
+  mode?: "epay" | "alipay_open" | string;
+  gateway_url?: string;
+  merchant_id?: string;
+  merchant_key?: string;
+  merchant_key_configured?: boolean;
+  app_private_key?: string;
+  app_private_key_configured?: boolean;
+  alipay_public_key?: string;
+  alipay_public_key_configured?: boolean;
+  pay_types: string[];
+  site_name?: string;
+};
+
+export type SubscriptionConfig = {
+  enabled: boolean;
+  payment_ready?: boolean;
+  payment: SubscriptionPaymentConfig;
+  plans: SubscriptionPlan[];
+};
+
+export type SubscriptionOrder = {
+  id: string;
+  owner_id?: string;
+  owner_name?: string;
+  provider?: string;
+  plan_id: string;
+  plan_name: string;
+  quota: number;
+  money: string;
+  pay_type: string;
+  status: "pending" | "paid" | string;
+  trade_no?: string;
+  created_at?: string;
+  updated_at?: string;
+  paid_at?: string;
+  quota_granted?: boolean;
+};
+
+export type SubscriptionCheckout = {
+  order: SubscriptionOrder;
+  mode?: string;
+  action: string;
+  fields: Record<string, string>;
+  url: string;
+  qr_code?: string;
+  qr_image_url?: string;
 };
 
 export type ManagedImage = {
@@ -226,6 +313,8 @@ export type ManagedImage = {
   aspect_ratio?: string;
   orientation?: string;
   megapixels?: number;
+  prompt?: string;
+  revised_prompt?: string;
   created_at: string;
   published_at?: string;
 };
@@ -330,7 +419,13 @@ export type CreationTask = {
 
 export type CreationTaskMessage = {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  content:
+    | string
+    | Array<
+        | { type: "text"; text: string }
+        | { type: "image_url"; image_url: { url: string } }
+        | { type: "input_image"; image_url: string }
+      >;
 };
 
 export type ChatCompletionResponse = {
@@ -361,15 +456,79 @@ export type LoginResponse = {
   menu_paths?: string[];
   api_permissions?: string[];
   menus?: PermissionMenu[];
+  image_quota_total?: number | null;
+  image_quota_used?: number;
+  image_quota_remaining?: number | null;
 };
 
 export type AuthProviders = {
   linuxdo: {
     enabled: boolean;
   };
+  social_login?: {
+    enabled: boolean;
+    qq_enabled?: boolean;
+    wx_enabled?: boolean;
+    douyin_enabled?: boolean;
+  };
   registration?: {
     enabled: boolean;
+    require_invite_code?: boolean;
   };
+  turnstile?: {
+    enabled: boolean;
+    site_key?: string;
+  };
+};
+
+export type InviteSummary = {
+  invite_code: string;
+  invite_url: string;
+  invited_count: number;
+  invite_reward_quota: number;
+  invitee_bonus_quota: number;
+  invite_reward_total: number;
+  invited_users?: Array<{
+    id?: string;
+    username?: string;
+    name?: string;
+    email?: string;
+    bonus_quota?: number;
+    created_at?: string;
+  }>;
+};
+
+export type PublicInvite = {
+  invite_code: string;
+  invite_url: string;
+  inviter_name?: string;
+  invitee_bonus_quota: number;
+};
+
+export type ImageShare = {
+  id: string;
+  share_url: string;
+  image_url: string;
+  mime_type?: string;
+  prompt?: string;
+  revised_prompt?: string;
+  model?: string;
+  size?: string;
+  quality?: string;
+  result_index?: number;
+  created_at?: string;
+  inviter_invite_code?: string;
+};
+
+export type CreateImageSharePayload = {
+  image: string;
+  prompt?: string;
+  revised_prompt?: string;
+  model?: string;
+  size?: string;
+  quality?: string;
+  result_index?: number;
+  share_id?: string;
 };
 
 export type Announcement = {
@@ -381,6 +540,55 @@ export type Announcement = {
   show_image: boolean;
   created_at?: string | null;
   updated_at?: string | null;
+};
+
+export type CheckinState = {
+  enabled: boolean;
+  available_for_user?: boolean;
+  today?: string;
+  rewards: number[];
+  checked_today: boolean;
+  already_checked_in_today?: boolean;
+  next_day: number;
+  next_reward: number;
+  last_checkin_date?: string;
+  checkin_streak?: number;
+  current_streak?: number;
+  checkin_total?: number;
+  total_days?: number;
+  checkin_reward_total?: number;
+  total_reward?: number;
+  image_quota_total?: number | null;
+  image_quota_used?: number;
+  image_quota_remaining?: number | null;
+  checkin_log?: Array<{
+    date?: string;
+    day?: number;
+    reward?: number;
+  }>;
+};
+
+export type CheckinResponse = {
+  already_checked: boolean;
+  reward: number;
+  state: CheckinState;
+};
+
+export type AdminCheckinConfig = {
+  enabled: boolean;
+  rewards: number[];
+};
+
+export type AdminCheckinLog = {
+  owner_id?: string;
+  invite_code?: string;
+  date?: string;
+  day?: number;
+  reward?: number;
+};
+
+export type AdminCheckinLogsResponse = AdminCheckinConfig & {
+  items: AdminCheckinLog[];
 };
 
 export type UserKey = {
@@ -426,6 +634,9 @@ export type ManagedUser = {
   success_count?: number;
   failure_count?: number;
   quota_used?: number;
+  image_quota_total?: number | null;
+  image_quota_used?: number;
+  image_quota_remaining?: number | null;
   usage_curve?: Array<{
     date: string;
     calls: number;
@@ -455,6 +666,16 @@ export type CreateManagedUserPayload = {
   password: string;
   role_id?: string;
   enabled?: boolean;
+  image_quota_total?: number | null;
+};
+
+export type UpdateManagedUserPayload = {
+  enabled?: boolean;
+  name?: string;
+  role_id?: string;
+  password?: string;
+  image_quota_total?: number | null;
+  image_quota_delta?: number;
 };
 
 export type RegisterConfig = {
@@ -495,18 +716,38 @@ export type RegisterConfig = {
   }>;
 };
 
-export async function login(username: string, password: string) {
+export async function login(username: string, password: string, turnstileToken?: string) {
   return httpRequest<LoginResponse>("/auth/login", {
     method: "POST",
-    body: { username, password },
+    body: { username, password, turnstile_token: turnstileToken ?? "" },
     redirectOnUnauthorized: false,
   });
 }
 
-export async function registerAccount(username: string, password: string, name?: string) {
+export async function loginWithAdminKey(key: string, turnstileToken?: string) {
+  return httpRequest<LoginResponse>("/auth/admin/login", {
+    method: "POST",
+    body: { key, turnstile_token: turnstileToken ?? "" },
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function registerAccount(
+  username: string,
+  password: string,
+  name?: string,
+  turnstileToken?: string,
+  inviteCode?: string,
+) {
   return httpRequest<LoginResponse>("/auth/register", {
     method: "POST",
-    body: { username, password, name: name ?? "" },
+    body: {
+      username,
+      password,
+      name: name ?? "",
+      turnstile_token: turnstileToken ?? "",
+      invite_code: inviteCode ?? "",
+    },
     redirectOnUnauthorized: false,
   });
 }
@@ -534,11 +775,122 @@ export async function fetchAuthProviders() {
   });
 }
 
+export async function fetchMyInvite() {
+  return httpRequest<InviteSummary>("/api/invite/me");
+}
+
+export async function fetchPublicInvite(code: string) {
+  const params = new URLSearchParams({ code });
+  return httpRequest<PublicInvite>(`/auth/invite?${params.toString()}`, {
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function createImageShare(payload: CreateImageSharePayload) {
+  return httpRequest<ImageShare>("/api/image-shares", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function fetchImageShare(id: string) {
+  const params = new URLSearchParams({ id });
+  return httpRequest<ImageShare>(`/api/image-shares?${params.toString()}`, {
+    headers: {
+      Accept: "application/json",
+    },
+    redirectOnUnauthorized: false,
+  });
+}
+
+export type AppNotification = {
+  id: string;
+  category: string;
+  title: string;
+  body: string;
+  meta?: Record<string, unknown>;
+  created_at: string;
+  read_at?: string;
+  owner_id?: string;
+};
+
+export type NotificationListResponse = {
+  items: AppNotification[];
+  unread: number;
+};
+
+export async function fetchNotifications(limit = 50) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return httpRequest<NotificationListResponse>(`/api/notifications?${params.toString()}`, {
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function markAllNotificationsRead() {
+  return httpRequest<{ updated: number; unread: number }>("/api/notifications", {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function markNotificationRead(id: string) {
+  return httpRequest<{ item: AppNotification; unread: number }>(`/api/notifications/${encodeURIComponent(id)}/read`, {
+    method: "POST",
+    body: {},
+  });
+}
+
+export async function deleteNotification(id: string) {
+  return httpRequest<{ ok: boolean; unread: number }>(`/api/notifications/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function broadcastNotification(payload: { title: string; body: string; category?: string; meta?: Record<string, unknown> }) {
+  return httpRequest<{ delivered: number; recipients: number }>("/api/admin/notifications/broadcast", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function backfillRegistrationBonus() {
+  return httpRequest<{ scanned: number; credited: number; free_quota: number }>("/api/admin/notifications/backfill", {
+    method: "POST",
+    body: {},
+  });
+}
+
 export async function fetchVisibleAnnouncements(target: AnnouncementTarget) {
   const params = new URLSearchParams({ target });
   return httpRequest<{ items: Announcement[] }>(`/api/announcements?${params.toString()}`, {
     redirectOnUnauthorized: false,
   });
+}
+
+export async function fetchCheckinStatus() {
+  return httpRequest<CheckinState>("/api/checkin/status");
+}
+
+export async function submitCheckin() {
+  return httpRequest<CheckinResponse>("/api/checkin", {
+    method: "POST",
+  });
+}
+
+export async function fetchAdminCheckinConfig() {
+  return httpRequest<AdminCheckinConfig>("/api/checkin/admin/config");
+}
+
+export async function updateAdminCheckinConfig(config: AdminCheckinConfig) {
+  return httpRequest<AdminCheckinConfig>("/api/checkin/admin/config", {
+    method: "POST",
+    body: config,
+  });
+}
+
+export async function fetchAdminCheckinLogs(limit = 30) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  return httpRequest<AdminCheckinLogsResponse>(`/api/checkin/admin/logs?${params.toString()}`);
 }
 
 export async function fetchAdminAnnouncements() {
@@ -864,6 +1216,33 @@ export async function updateLoginPageImageSettings(
   });
 }
 
+export async function fetchSubscriptionConfig() {
+  return httpRequest<{ config: SubscriptionConfig }>("/api/subscription/config");
+}
+
+export async function createSubscriptionCheckout(planId: string, payType: string) {
+  return httpRequest<SubscriptionCheckout>("/api/subscription/checkout", {
+    method: "POST",
+    body: { plan_id: planId, pay_type: payType },
+  });
+}
+
+export async function fetchSubscriptionOrder(orderId: string) {
+  const params = new URLSearchParams({ id: orderId });
+  return httpRequest<{ order: SubscriptionOrder }>(`/api/subscription/order?${params.toString()}`);
+}
+
+export async function fetchAdminSubscription() {
+  return httpRequest<{ config: SubscriptionConfig; orders: SubscriptionOrder[] }>("/api/admin/subscription");
+}
+
+export async function updateAdminSubscription(config: SubscriptionConfig) {
+  return httpRequest<{ config: SubscriptionConfig; orders: SubscriptionOrder[] }>("/api/admin/subscription", {
+    method: "POST",
+    body: config,
+  });
+}
+
 export async function fetchManagedImages(
   filters: { start_date?: string; end_date?: string; scope?: "mine" | "public" | "all" },
   options: { signal?: AbortSignal } = {},
@@ -1031,8 +1410,39 @@ function managedUserPath(userId: string) {
   return `/api/admin/users/${encodeURIComponent(userId)}`;
 }
 
-export async function fetchManagedUsers() {
-  return httpRequest<{ items: ManagedUser[] }>("/api/admin/users");
+export type ManagedUsersQuery = {
+  page?: number | string;
+  page_size?: number | string;
+  search?: string;
+  provider?: "all" | "local" | "linuxdo" | string;
+  status?: "all" | "enabled" | "disabled" | string;
+};
+
+export type ManagedUsersResponse = {
+  items: ManagedUser[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+};
+
+export async function fetchManagedUsers(query: ManagedUsersQuery = {}) {
+  const params = new URLSearchParams();
+  if (query.page) params.set("page", String(query.page));
+  if (query.page_size) params.set("page_size", String(query.page_size));
+  if (query.search?.trim()) params.set("search", query.search.trim());
+  if (query.provider && query.provider !== "all") params.set("provider", query.provider);
+  if (query.status && query.status !== "all") params.set("status", query.status);
+  const data = await httpRequest<Partial<ManagedUsersResponse>>(
+    `/api/admin/users${params.toString() ? `?${params.toString()}` : ""}`,
+  );
+  return {
+    items: Array.isArray(data.items) ? data.items : [],
+    total: Number(data.total ?? data.items?.length ?? 0),
+    page: Number(data.page ?? query.page ?? 1),
+    page_size: Number(data.page_size ?? query.page_size ?? 20),
+    total_pages: Number(data.total_pages ?? 1),
+  } satisfies ManagedUsersResponse;
 }
 
 export async function fetchPermissionCatalog() {
@@ -1084,12 +1494,22 @@ export async function createManagedUser(payload: CreateManagedUserPayload) {
 
 export async function updateManagedUser(
   userId: string,
-  updates: { enabled?: boolean; name?: string; role_id?: string },
+  updates: UpdateManagedUserPayload,
 ) {
   return httpRequest<{ item: ManagedUser; items: ManagedUser[] }>(managedUserPath(userId), {
     method: "POST",
     body: updates,
   });
+}
+
+export async function adjustManagedUserQuota(userId: string, delta: number) {
+  return httpRequest<{ item: ManagedUser; items: ManagedUser[]; notification?: AppNotification }>(
+    `${managedUserPath(userId)}/quota`,
+    {
+      method: "POST",
+      body: { delta },
+    },
+  );
 }
 
 export async function revealManagedUserKey(userId: string) {

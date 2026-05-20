@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { AnnouncementMarkdown } from "@/components/announcement-markdown";
 import {
   Dialog,
   DialogContent,
@@ -59,7 +60,7 @@ const emptyForm: AnnouncementForm = {
   content: "",
   enabled: true,
   show_login: true,
-  show_image: false,
+  show_image: true,
 };
 
 function formatDateTime(value?: string | null) {
@@ -90,6 +91,7 @@ function formFromAnnouncement(item: Announcement): AnnouncementForm {
 
 export function AnnouncementsCard() {
   const didLoadRef = useRef(false);
+  const contentTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [items, setItems] = useState<Announcement[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -145,6 +147,22 @@ export function AnnouncementsCard() {
 
   const updateForm = (updates: Partial<AnnouncementForm>) => {
     setForm((current) => ({ ...current, ...updates }));
+  };
+
+  const insertMarkdownSnippet = (snippet: string) => {
+    const textarea = contentTextareaRef.current;
+    if (!textarea) {
+      updateForm({ content: `${form.content}${form.content ? "\n" : ""}${snippet}` });
+      return;
+    }
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const nextContent = `${form.content.slice(0, start)}${snippet}${form.content.slice(end)}`;
+    updateForm({ content: nextContent });
+    window.requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(start + snippet.length, start + snippet.length);
+    });
   };
 
   const handleSave = async () => {
@@ -263,9 +281,7 @@ export function AnnouncementsCard() {
                           <Badge variant="info">创作台</Badge>
                         ) : null}
                       </div>
-                      <p className="mt-2 line-clamp-2 whitespace-pre-wrap break-words text-sm leading-6 text-muted-foreground">
-                        {item.content}
-                      </p>
+                      <AnnouncementMarkdown className="mt-2 line-clamp-2 text-muted-foreground" compact>{item.content}</AnnouncementMarkdown>
                       <div className="mt-2 text-xs text-muted-foreground/80">
                         更新于 {formatDateTime(item.updated_at)}
                       </div>
@@ -314,14 +330,14 @@ export function AnnouncementsCard() {
       </SettingsCard>
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="rounded-2xl p-6">
-          <DialogHeader className="gap-2">
+        <DialogContent className="max-h-[min(92vh,760px)] overflow-hidden rounded-2xl p-0">
+          <DialogHeader className="gap-2 px-6 pb-2 pt-6">
             <DialogTitle>{editingItem ? "编辑公告" : "添加公告"}</DialogTitle>
             <DialogDescription className="text-sm leading-6">
               公告内容会按勾选位置显示给对应页面的用户。
             </DialogDescription>
           </DialogHeader>
-          <FieldGroup>
+          <FieldGroup className="max-h-[min(62vh,520px)] overflow-y-auto px-6 py-4">
             <Field>
               <FieldLabel htmlFor="announcement-title">标题</FieldLabel>
               <Input
@@ -335,17 +351,45 @@ export function AnnouncementsCard() {
             <Field>
               <FieldLabel htmlFor="announcement-content">内容</FieldLabel>
               <Textarea
+                ref={contentTextareaRef}
                 id="announcement-content"
                 value={form.content}
                 onChange={(event) =>
                   updateForm({ content: event.target.value })
                 }
-                placeholder="填写公告内容"
+                placeholder={"### 更新公告\n支持加粗、链接、列表等 Markdown 语法。"}
                 className="min-h-36 bg-background"
               />
               <FieldDescription>
-                保存前会去除首尾空白，内容不能为空。
+                支持 Markdown：标题（#）、列表（- / 1.）、加粗（**）、引用（&gt;）、链接（[文本](URL)）。
               </FieldDescription>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  ["标题", "### 公告标题"],
+                  ["加粗", "**重点内容**"],
+                  ["链接", "[查看详情](https://images.dfmcn.com)"],
+                  ["列表", "- 第一条\n- 第二条"],
+                  ["引用", "> 重要提醒内容"],
+                ].map(([label, snippet]) => (
+                  <Button
+                    key={label}
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => insertMarkdownSnippet(snippet)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+              {form.content.trim() ? (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-4">
+                  <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-amber-700">
+                    Markdown 预览
+                  </div>
+                  <AnnouncementMarkdown className="text-stone-800">{form.content}</AnnouncementMarkdown>
+                </div>
+              ) : null}
             </Field>
             <div className="grid gap-3 md:grid-cols-3">
               <label className={settingsToggleClassName}>
@@ -377,7 +421,7 @@ export function AnnouncementsCard() {
               </label>
             </div>
           </FieldGroup>
-          <DialogFooter>
+          <DialogFooter className="border-t border-border bg-background px-6 py-4">
             <Button
               type="button"
               variant="secondary"

@@ -1,23 +1,25 @@
-import type { ReactNode } from "react";
+/* eslint-disable react/only-export-components -- This file is a route registry, not a hot-reloaded component module. */
+import { lazy, type ReactNode } from "react";
 
-import AccountsPage from "@/app/accounts/page";
-import AdminLoginPage from "@/app/admin-login/page";
-import LinuxDoCallbackPage from "@/app/auth/linuxdo/callback/page";
-import SocialCallbackPage from "@/app/auth/social/callback/page";
-import ImagePage from "@/app/image/page";
-import ImageManagerPage from "@/app/image-manager/page";
-import InvitationPage from "@/app/invitation/page";
-import InvitePage from "@/app/invite/page";
-import EcommerceAgentPage from "@/app/ecommerce-agent/page";
-import HomePage from "@/app/page";
-import LoginPage from "@/app/login/page";
-import LogsPage from "@/app/logs/page";
-import ProfilePage from "@/app/profile/page";
-import RBACPage from "@/app/rbac/page";
-import RegisterPage from "@/app/register/page";
-import SettingsPage from "@/app/settings/page";
-import SharePage from "@/app/share/page";
-import UsersPage from "@/app/users/page";
+const AccountsPage = lazy(() => import("@/app/accounts/page"));
+const AdminLoginPage = lazy(() => import("@/app/admin-login/page"));
+const LinuxDoCallbackPage = lazy(() => import("@/app/auth/linuxdo/callback/page"));
+const SocialCallbackPage = lazy(() => import("@/app/auth/social/callback/page"));
+const ImagePage = lazy(() => import("@/app/image/page"));
+const ImageManagerPage = lazy(() => import("@/app/image-manager/page"));
+const InvitationPage = lazy(() => import("@/app/invitation/page"));
+const InvitePage = lazy(() => import("@/app/invite/page"));
+const EcommerceAgentPage = lazy(() => import("@/app/ecommerce-agent/page"));
+const HomePage = lazy(() => import("@/app/page"));
+const LoginPage = lazy(() => import("@/app/login/page"));
+const LogsPage = lazy(() => import("@/app/logs/page"));
+const ProfilePage = lazy(() => import("@/app/profile/page"));
+const RBACPage = lazy(() => import("@/app/rbac/page"));
+const RegisterPage = lazy(() => import("@/app/register/page"));
+const SettingsPage = lazy(() => import("@/app/settings/page"));
+const SharePage = lazy(() => import("@/app/share/page"));
+const SubscriptionPage = lazy(() => import("@/app/subscription/page"));
+const UsersPage = lazy(() => import("@/app/users/page"));
 
 export type AppRouteConfig = {
   path: string;
@@ -37,6 +39,7 @@ export const appRoutes: AppRouteConfig[] = [
   { path: "/accounts", element: <AccountsPage />, requiredPath: "/accounts" },
   { path: "/register", element: <RegisterPage />, requiredPath: "/register" },
   { path: "/image-manager", element: <ImageManagerPage />, requiredPath: "/image-manager" },
+  { path: "/subscription", element: <SubscriptionPage />, requiredPath: "/subscription" },
   { path: "/invite", element: <InvitePage />, requiredPath: "/invite" },
   { path: "/users", element: <UsersPage />, requiredPath: "/users" },
   { path: "/profile", element: <ProfilePage />, requiredPath: "/profile" },

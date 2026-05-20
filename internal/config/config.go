@@ -18,31 +18,55 @@ import (
 )
 
 var settingEnvKeys = map[string]string{
-	"base_url":                          "CHATGPT2API_BASE_URL",
-	"proxy":                             "CHATGPT2API_PROXY",
-	"refresh_account_interval_minute":   "CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE",
-	"image_concurrent_limit":            "CHATGPT2API_IMAGE_CONCURRENT_LIMIT",
-	"image_task_timeout_seconds":        "CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS",
-	"user_default_concurrent_limit":     "CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT",
-	"user_default_rpm_limit":            "CHATGPT2API_USER_DEFAULT_RPM_LIMIT",
-	"image_retention_days":              "CHATGPT2API_IMAGE_RETENTION_DAYS",
-	"auto_remove_invalid_accounts":      "CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS",
-	"auto_remove_rate_limited_accounts": "CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS",
-	"log_retention_days":                "CHATGPT2API_LOG_RETENTION_DAYS",
-	"log_levels":                        "CHATGPT2API_LOG_LEVELS",
-	"linuxdo_enabled":                   "CHATGPT2API_LINUXDO_ENABLED",
-	"linuxdo_client_id":                 "CHATGPT2API_LINUXDO_CLIENT_ID",
-	"linuxdo_client_secret":             "CHATGPT2API_LINUXDO_CLIENT_SECRET",
-	"linuxdo_redirect_url":              "CHATGPT2API_LINUXDO_REDIRECT_URL",
-	"linuxdo_frontend_redirect_url":     "CHATGPT2API_LINUXDO_FRONTEND_REDIRECT_URL",
-	"update_repo":                       "CHATGPT2API_UPDATE_REPO",
-	"update_github_token":               "CHATGPT2API_UPDATE_GITHUB_TOKEN",
-	"registration_enabled":              "CHATGPT2API_REGISTRATION_ENABLED",
-	"login_page_image_url":              "CHATGPT2API_LOGIN_PAGE_IMAGE_URL",
-	"login_page_image_mode":             "CHATGPT2API_LOGIN_PAGE_IMAGE_MODE",
-	"login_page_image_zoom":             "CHATGPT2API_LOGIN_PAGE_IMAGE_ZOOM",
-	"login_page_image_position_x":       "CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_X",
-	"login_page_image_position_y":       "CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_Y",
+	"base_url":                           "CHATGPT2API_BASE_URL",
+	"proxy":                              "CHATGPT2API_PROXY",
+	"refresh_account_interval_minute":    "CHATGPT2API_REFRESH_ACCOUNT_INTERVAL_MINUTE",
+	"image_concurrent_limit":             "CHATGPT2API_IMAGE_CONCURRENT_LIMIT",
+	"image_task_timeout_seconds":         "CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS",
+	"user_default_concurrent_limit":      "CHATGPT2API_USER_DEFAULT_CONCURRENT_LIMIT",
+	"user_default_rpm_limit":             "CHATGPT2API_USER_DEFAULT_RPM_LIMIT",
+	"image_retention_days":               "CHATGPT2API_IMAGE_RETENTION_DAYS",
+	"auto_remove_invalid_accounts":       "CHATGPT2API_AUTO_REMOVE_INVALID_ACCOUNTS",
+	"auto_remove_rate_limited_accounts":  "CHATGPT2API_AUTO_REMOVE_RATE_LIMITED_ACCOUNTS",
+	"log_retention_days":                 "CHATGPT2API_LOG_RETENTION_DAYS",
+	"log_levels":                         "CHATGPT2API_LOG_LEVELS",
+	"linuxdo_enabled":                    "CHATGPT2API_LINUXDO_ENABLED",
+	"linuxdo_client_id":                  "CHATGPT2API_LINUXDO_CLIENT_ID",
+	"linuxdo_client_secret":              "CHATGPT2API_LINUXDO_CLIENT_SECRET",
+	"linuxdo_redirect_url":               "CHATGPT2API_LINUXDO_REDIRECT_URL",
+	"linuxdo_frontend_redirect_url":      "CHATGPT2API_LINUXDO_FRONTEND_REDIRECT_URL",
+	"qq_enabled":                         "CHATGPT2API_QQ_ENABLED",
+	"qq_client_id":                       "CHATGPT2API_QQ_CLIENT_ID",
+	"qq_client_secret":                   "CHATGPT2API_QQ_CLIENT_SECRET",
+	"qq_redirect_url":                    "CHATGPT2API_QQ_REDIRECT_URL",
+	"qq_frontend_redirect_url":           "CHATGPT2API_QQ_FRONTEND_REDIRECT_URL",
+	"social_login_base_url":              "CHATGPT2API_SOCIAL_LOGIN_BASE_URL",
+	"social_login_app_id":                "CHATGPT2API_SOCIAL_LOGIN_APP_ID",
+	"social_login_app_key":               "CHATGPT2API_SOCIAL_LOGIN_APP_KEY",
+	"social_login_redirect_url":          "CHATGPT2API_SOCIAL_LOGIN_REDIRECT_URL",
+	"social_login_frontend_redirect_url": "CHATGPT2API_SOCIAL_LOGIN_FRONTEND_REDIRECT_URL",
+	"social_login_qq_enabled":            "CHATGPT2API_SOCIAL_LOGIN_QQ_ENABLED",
+	"social_login_wx_enabled":            "CHATGPT2API_SOCIAL_LOGIN_WX_ENABLED",
+	"social_login_douyin_enabled":        "CHATGPT2API_SOCIAL_LOGIN_DOUYIN_ENABLED",
+	"update_repo":                        "CHATGPT2API_UPDATE_REPO",
+	"update_github_token":                "CHATGPT2API_UPDATE_GITHUB_TOKEN",
+	"registration_enabled":               "CHATGPT2API_REGISTRATION_ENABLED",
+	"registration_require_invite_code":   "CHATGPT2API_REGISTRATION_REQUIRE_INVITE_CODE",
+	"user_free_quota":                    "CHATGPT2API_USER_FREE_QUOTA",
+	"invite_reward_quota":                "CHATGPT2API_INVITE_REWARD_QUOTA",
+	"invitee_bonus_quota":                "CHATGPT2API_INVITEE_BONUS_QUOTA",
+	"turnstile_enabled":                  "CHATGPT2API_TURNSTILE_ENABLED",
+	"turnstile_site_key":                 "CHATGPT2API_TURNSTILE_SITE_KEY",
+	"turnstile_secret_key":               "CHATGPT2API_TURNSTILE_SECRET_KEY",
+	"image_upscale_2k_quota_cost":        "CHATGPT2API_IMAGE_UPSCALE_2K_QUOTA_COST",
+	"image_upscale_4k_quota_cost":        "CHATGPT2API_IMAGE_UPSCALE_4K_QUOTA_COST",
+	"checkin_enabled":                    "CHATGPT2API_CHECKIN_ENABLED",
+	"checkin_rewards":                    "CHATGPT2API_CHECKIN_REWARDS",
+	"login_page_image_url":               "CHATGPT2API_LOGIN_PAGE_IMAGE_URL",
+	"login_page_image_mode":              "CHATGPT2API_LOGIN_PAGE_IMAGE_MODE",
+	"login_page_image_zoom":              "CHATGPT2API_LOGIN_PAGE_IMAGE_ZOOM",
+	"login_page_image_position_x":        "CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_X",
+	"login_page_image_position_y":        "CHATGPT2API_LOGIN_PAGE_IMAGE_POSITION_Y",
 }
 
 var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -54,13 +78,12 @@ const (
 )
 
 type Store struct {
-	mu              sync.RWMutex
-	RootDir         string
-	DataDir         string
-	EnvFile         string
-	data            map[string]any
-	externalEnvKeys map[string]struct{}
-	storageBackend  storage.Backend
+	mu             sync.RWMutex
+	RootDir        string
+	DataDir        string
+	EnvFile        string
+	data           map[string]any
+	storageBackend storage.Backend
 }
 
 type LinuxDoOAuthConfig struct {
@@ -80,6 +103,30 @@ type LinuxDoOAuthConfig struct {
 	UserInfoUsernamePath string
 }
 
+type QQOAuthConfig struct {
+	Enabled             bool
+	ClientID            string
+	ClientSecret        string
+	AuthorizeURL        string
+	TokenURL            string
+	OpenIDURL           string
+	UserInfoURL         string
+	Scopes              string
+	RedirectURL         string
+	FrontendRedirectURL string
+}
+
+type SocialLoginConfig struct {
+	BaseURL             string
+	AppID               string
+	AppKey              string
+	RedirectURL         string
+	FrontendRedirectURL string
+	QQEnabled           bool
+	WXEnabled           bool
+	DouyinEnabled       bool
+}
+
 func NewStore() (*Store, error) {
 	root, err := resolveRootDir()
 	if err != nil {
@@ -89,18 +136,10 @@ func NewStore() (*Store, error) {
 	envFile := filepath.Join(root, ".env")
 	envFileValues := readEnvObject(envFile)
 	s := &Store{
-		RootDir:         root,
-		DataDir:         filepath.Join(root, "data"),
-		EnvFile:         envFile,
-		data:            map[string]any{},
-		externalEnvKeys: map[string]struct{}{},
-	}
-	for _, item := range os.Environ() {
-		key, value, _ := strings.Cut(item, "=")
-		if fileValue, ok := envFileValues[key]; ok && value == fileValue {
-			continue
-		}
-		s.externalEnvKeys[key] = struct{}{}
+		RootDir: root,
+		DataDir: filepath.Join(root, "data"),
+		EnvFile: envFile,
+		data:    map[string]any{},
 	}
 	if err := os.MkdirAll(s.DataDir, 0o755); err != nil {
 		return nil, err
@@ -116,7 +155,7 @@ func resolveRootDir() (string, error) {
 		return "", err
 	}
 	if configured := strings.TrimSpace(os.Getenv("CHATGPT2API_ROOT")); configured != "" {
-		return filepath.Abs(configured)
+		return canonicalDir(configured)
 	}
 	if root := findAncestorWithFile(cwd, ".env"); root != "" {
 		return root, nil
@@ -124,7 +163,7 @@ func resolveRootDir() (string, error) {
 	if root := findAncestorWithProjectGoMod(cwd); root != "" {
 		return root, nil
 	}
-	return filepath.Abs(cwd)
+	return canonicalDir(cwd)
 }
 
 func findAncestorWithFile(start, name string) string {
@@ -135,7 +174,7 @@ func findAncestorWithFile(start, name string) string {
 	for {
 		info, statErr := os.Stat(filepath.Join(dir, name))
 		if statErr == nil && !info.IsDir() {
-			return dir
+			return canonicalDirOrSelf(dir)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -153,7 +192,7 @@ func findAncestorWithProjectGoMod(start string) string {
 	for {
 		data, readErr := os.ReadFile(filepath.Join(dir, "go.mod"))
 		if readErr == nil && strings.Contains(string(data), "module chatgpt2api") {
-			return dir
+			return canonicalDirOrSelf(dir)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -161,6 +200,25 @@ func findAncestorWithProjectGoMod(start string) string {
 		}
 		dir = parent
 	}
+}
+
+func canonicalDir(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(abs); resolveErr == nil {
+		return resolved, nil
+	}
+	return abs, nil
+}
+
+func canonicalDirOrSelf(path string) string {
+	resolved, err := canonicalDir(path)
+	if err != nil {
+		return path
+	}
+	return resolved
 }
 
 func (s *Store) AdminUsername() string {
@@ -177,6 +235,74 @@ func (s *Store) AdminPassword() string {
 
 func (s *Store) RegistrationEnabled() bool {
 	return util.ToBool(s.settingValue("registration_enabled", false))
+}
+
+func (s *Store) RegistrationRequireInviteCode() bool {
+	return util.ToBool(s.settingValue("registration_require_invite_code", false))
+}
+
+func (s *Store) UserFreeQuota() int {
+	value := intSetting(s.settingValue("user_free_quota", 10), 10)
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func (s *Store) InviteRewardQuota() int {
+	value := intSetting(s.settingValue("invite_reward_quota", 0), 0)
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func (s *Store) InviteeBonusQuota() int {
+	value := intSetting(s.settingValue("invitee_bonus_quota", 0), 0)
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func (s *Store) TurnstileEnabled() bool {
+	return util.ToBool(s.settingValue("turnstile_enabled", false))
+}
+
+func (s *Store) TurnstileSiteKey() string {
+	return strings.TrimSpace(fmt.Sprint(s.settingValue("turnstile_site_key", "")))
+}
+
+func (s *Store) TurnstileSecretKey() string {
+	return strings.TrimSpace(fmt.Sprint(s.settingValue("turnstile_secret_key", "")))
+}
+
+func (s *Store) TurnstileReady() bool {
+	return s.TurnstileEnabled() && s.TurnstileSiteKey() != "" && s.TurnstileSecretKey() != ""
+}
+
+func (s *Store) ImageUpscale2KQuotaCost() int {
+	value := intSetting(s.settingValue("image_upscale_2k_quota_cost", 2), 2)
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func (s *Store) ImageUpscale4KQuotaCost() int {
+	value := intSetting(s.settingValue("image_upscale_4k_quota_cost", 5), 5)
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func (s *Store) CheckinEnabled() bool {
+	return util.ToBool(s.settingValue("checkin_enabled", true))
+}
+
+func (s *Store) CheckinRewards() []int {
+	return parseIntListSetting(s.settingValue("checkin_rewards", "1,1,2,2,3,3,7"), []int{1, 1, 2, 2, 3, 3, 7})
 }
 
 func (s *Store) RefreshAccountIntervalMinute() int {
@@ -203,7 +329,7 @@ func (s *Store) LogRetentionDays() int {
 }
 
 func (s *Store) ImageConcurrentLimit() int {
-	value := intSetting(s.settingValue("image_concurrent_limit", 4), 4)
+	value := intSetting(s.settingValue("image_concurrent_limit", 8), 8)
 	if value < 1 {
 		return 1
 	}
@@ -292,6 +418,59 @@ func (s *Store) LinuxDoOAuth() LinuxDoOAuthConfig {
 	return s.linuxDoOAuthFromData(data)
 }
 
+func (s *Store) QQOAuth() QQOAuthConfig {
+	s.mu.RLock()
+	data := util.CopyMap(s.data)
+	s.mu.RUnlock()
+	return s.qqOAuthFromData(data)
+}
+
+func (s *Store) SocialLogin() SocialLoginConfig {
+	s.mu.RLock()
+	data := util.CopyMap(s.data)
+	s.mu.RUnlock()
+	return s.socialLoginFromData(data)
+}
+
+func (s *Store) socialLoginFromData(data map[string]any) SocialLoginConfig {
+	redirectURL := strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "social_login_redirect_url", "")))
+	baseURL := strings.TrimRight(strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "base_url", ""))), "/")
+	if redirectURL == "" && baseURL != "" {
+		redirectURL = baseURL + "/auth/social/oauth/callback"
+	}
+	frontendRedirect := strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "social_login_frontend_redirect_url", "/auth/social/callback")))
+	return SocialLoginConfig{
+		BaseURL:             strings.TrimRight(strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "social_login_base_url", ""))), "/"),
+		AppID:               strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "social_login_app_id", ""))),
+		AppKey:              strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "social_login_app_key", ""))),
+		RedirectURL:         redirectURL,
+		FrontendRedirectURL: frontendRedirect,
+		QQEnabled:           util.ToBool(s.settingValueFromData(data, "social_login_qq_enabled", false)),
+		WXEnabled:           util.ToBool(s.settingValueFromData(data, "social_login_wx_enabled", false)),
+		DouyinEnabled:       util.ToBool(s.settingValueFromData(data, "social_login_douyin_enabled", false)),
+	}
+}
+
+func (s *Store) qqOAuthFromData(data map[string]any) QQOAuthConfig {
+	redirectURL := strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "qq_redirect_url", "")))
+	baseURL := strings.TrimRight(strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "base_url", ""))), "/")
+	if redirectURL == "" && baseURL != "" {
+		redirectURL = baseURL + "/auth/qq/oauth/callback"
+	}
+	return QQOAuthConfig{
+		Enabled:             util.ToBool(s.settingValueFromData(data, "qq_enabled", false)),
+		ClientID:            strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "qq_client_id", ""))),
+		ClientSecret:        strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "qq_client_secret", ""))),
+		AuthorizeURL:        envString("CHATGPT2API_QQ_AUTHORIZE_URL", "https://graph.qq.com/oauth2.0/authorize"),
+		TokenURL:            envString("CHATGPT2API_QQ_TOKEN_URL", "https://graph.qq.com/oauth2.0/token"),
+		OpenIDURL:           envString("CHATGPT2API_QQ_OPENID_URL", "https://graph.qq.com/oauth2.0/me"),
+		UserInfoURL:         envString("CHATGPT2API_QQ_USERINFO_URL", "https://graph.qq.com/user/get_user_info"),
+		Scopes:              envString("CHATGPT2API_QQ_SCOPES", "get_user_info"),
+		RedirectURL:         redirectURL,
+		FrontendRedirectURL: strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "qq_frontend_redirect_url", "/auth/qq/callback"))),
+	}
+}
+
 func (s *Store) linuxDoOAuthFromData(data map[string]any) LinuxDoOAuthConfig {
 	redirectURL := strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "linuxdo_redirect_url", "")))
 	baseURL := strings.TrimRight(strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "base_url", ""))), "/")
@@ -331,6 +510,39 @@ func (c LinuxDoOAuthConfig) Ready() bool {
 	default:
 		return false
 	}
+}
+
+func (c QQOAuthConfig) Ready() bool {
+	if !c.Enabled {
+		return false
+	}
+	return c.ClientID != "" &&
+		c.ClientSecret != "" &&
+		c.AuthorizeURL != "" &&
+		c.TokenURL != "" &&
+		c.OpenIDURL != "" &&
+		c.UserInfoURL != "" &&
+		c.RedirectURL != ""
+}
+
+func (c SocialLoginConfig) ProviderEnabled(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "qq":
+		return c.QQEnabled
+	case "wx", "wechat":
+		return c.WXEnabled
+	case "douyin", "dy":
+		return c.DouyinEnabled
+	default:
+		return false
+	}
+}
+
+func (c SocialLoginConfig) Ready() bool {
+	if c.BaseURL == "" || c.AppID == "" || c.AppKey == "" || c.RedirectURL == "" || c.FrontendRedirectURL == "" {
+		return false
+	}
+	return c.QQEnabled || c.WXEnabled || c.DouyinEnabled
 }
 
 func (s *Store) ImagesDir() string {
@@ -394,12 +606,38 @@ func (s *Store) Get() map[string]any {
 	data["proxy"] = s.Proxy()
 	data["base_url"] = s.BaseURL()
 	data["registration_enabled"] = s.RegistrationEnabled()
+	data["registration_require_invite_code"] = s.RegistrationRequireInviteCode()
+	data["user_free_quota"] = s.UserFreeQuota()
+	data["invite_reward_quota"] = s.InviteRewardQuota()
+	data["invitee_bonus_quota"] = s.InviteeBonusQuota()
+	data["turnstile_enabled"] = s.TurnstileReady()
+	data["turnstile_site_key"] = s.TurnstileSiteKey()
+	data["turnstile_secret_configured"] = s.TurnstileSecretKey() != ""
+	data["image_upscale_2k_quota_cost"] = s.ImageUpscale2KQuotaCost()
+	data["image_upscale_4k_quota_cost"] = s.ImageUpscale4KQuotaCost()
+	data["checkin_enabled"] = s.CheckinEnabled()
+	data["checkin_rewards"] = s.CheckinRewards()
 	linuxdo := s.LinuxDoOAuth()
 	data["linuxdo_enabled"] = linuxdo.Enabled
 	data["linuxdo_client_id"] = linuxdo.ClientID
 	data["linuxdo_client_secret_configured"] = linuxdo.ClientSecret != ""
 	data["linuxdo_redirect_url"] = linuxdo.RedirectURL
 	data["linuxdo_frontend_redirect_url"] = linuxdo.FrontendRedirectURL
+	qq := s.QQOAuth()
+	data["qq_enabled"] = qq.Enabled
+	data["qq_client_id"] = qq.ClientID
+	data["qq_client_secret_configured"] = qq.ClientSecret != ""
+	data["qq_redirect_url"] = qq.RedirectURL
+	data["qq_frontend_redirect_url"] = qq.FrontendRedirectURL
+	social := s.SocialLogin()
+	data["social_login_base_url"] = social.BaseURL
+	data["social_login_app_id"] = social.AppID
+	data["social_login_app_key_configured"] = social.AppKey != ""
+	data["social_login_redirect_url"] = social.RedirectURL
+	data["social_login_frontend_redirect_url"] = social.FrontendRedirectURL
+	data["social_login_qq_enabled"] = social.QQEnabled
+	data["social_login_wx_enabled"] = social.WXEnabled
+	data["social_login_douyin_enabled"] = social.DouyinEnabled
 	data["update_repo"] = s.UpdateRepo()
 	data["update_github_token_configured"] = s.UpdateGitHubToken() != ""
 	data["login_page_image_url"] = s.LoginPageImageURL()
@@ -408,7 +646,10 @@ func (s *Store) Get() map[string]any {
 	data["login_page_image_position_x"] = s.LoginPageImagePositionX()
 	data["login_page_image_position_y"] = s.LoginPageImagePositionY()
 	delete(data, "linuxdo_client_secret")
+	delete(data, "qq_client_secret")
+	delete(data, "social_login_app_key")
 	delete(data, "update_github_token")
+	delete(data, "turnstile_secret_key")
 	return data
 }
 
@@ -419,13 +660,31 @@ func (s *Store) Update(data map[string]any) (map[string]any, error) {
 		if key == "linuxdo_client_secret_configured" {
 			continue
 		}
+		if key == "qq_client_secret_configured" {
+			continue
+		}
+		if key == "social_login_app_key_configured" {
+			continue
+		}
 		if key == "update_github_token_configured" {
+			continue
+		}
+		if key == "turnstile_secret_configured" {
 			continue
 		}
 		if key == "linuxdo_client_secret" && strings.TrimSpace(fmt.Sprint(value)) == "" {
 			continue
 		}
+		if key == "qq_client_secret" && strings.TrimSpace(fmt.Sprint(value)) == "" {
+			continue
+		}
+		if key == "social_login_app_key" && strings.TrimSpace(fmt.Sprint(value)) == "" {
+			continue
+		}
 		if key == "update_github_token" && strings.TrimSpace(fmt.Sprint(value)) == "" {
+			continue
+		}
+		if key == "turnstile_secret_key" && strings.TrimSpace(fmt.Sprint(value)) == "" {
 			continue
 		}
 		next[key] = value
@@ -436,7 +695,11 @@ func (s *Store) Update(data map[string]any) (map[string]any, error) {
 	if value, ok := next["image_task_timeout_seconds"]; ok {
 		next["image_task_timeout_seconds"] = normalizeImageTaskTimeoutSeconds(value)
 	}
+	if value, ok := next["image_retention_days"]; ok {
+		next["image_retention_days"] = normalizeImageRetentionDays(value)
+	}
 	next["update_repo"] = normalizeUpdateRepo(util.ValueOr(next["update_repo"], "ZyphrZero/chatgpt2api"))
+	s.normalizeTurnstileUpdateLocked(next)
 	if err := s.validateSettingsUpdateLocked(next); err != nil {
 		s.mu.Unlock()
 		return nil, err
@@ -487,32 +750,27 @@ func (s *Store) StorageBackend() (storage.Backend, error) {
 
 func (s *Store) settingValue(key string, fallback any) any {
 	envKey := settingEnvKeys[key]
-	if value, ok := os.LookupEnv(envKey); ok {
+	s.mu.RLock()
+	if value, ok := s.data[key]; ok {
+		s.mu.RUnlock()
 		return value
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if value, ok := s.data[key]; ok {
-		return value
+	s.mu.RUnlock()
+	if envKey != "" {
+		if value, ok := os.LookupEnv(envKey); ok {
+			return value
+		}
 	}
 	return fallback
 }
 
 func (s *Store) settingValueFromData(data map[string]any, key string, fallback any) any {
-	envKey := settingEnvKeys[key]
-	if envKey != "" {
-		if value, ok := os.LookupEnv(envKey); ok {
-			if _, external := s.externalEnvKeys[envKey]; external {
-				return value
-			}
-		}
-	}
 	if data != nil {
 		if value, ok := data[key]; ok {
 			return value
 		}
 	}
-	if envKey != "" {
+	if envKey := settingEnvKeys[key]; envKey != "" {
 		if value, ok := os.LookupEnv(envKey); ok {
 			return value
 		}
@@ -524,8 +782,37 @@ func (s *Store) validateSettingsUpdateLocked(data map[string]any) error {
 	if err := validateUpdateRepo(util.Clean(util.ValueOr(data["update_repo"], "ZyphrZero/chatgpt2api"))); err != nil {
 		return err
 	}
+	if util.ToBool(s.settingValueFromData(data, "turnstile_enabled", false)) {
+		siteKey := strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "turnstile_site_key", "")))
+		secretKey := strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "turnstile_secret_key", "")))
+		if siteKey == "" || secretKey == "" {
+			return nil
+		}
+	}
 	linuxdo := s.linuxDoOAuthFromData(data)
 	if !linuxdo.Enabled {
+		qq := s.qqOAuthFromData(data)
+		if !qq.Enabled {
+			return nil
+		}
+		if qq.ClientID == "" {
+			return errors.New("QQ App ID is required when enabled")
+		}
+		if qq.ClientSecret == "" {
+			return errors.New("QQ App Secret is required when enabled")
+		}
+		if qq.RedirectURL == "" {
+			return errors.New("QQ Redirect URL is required when enabled")
+		}
+		if qq.FrontendRedirectURL == "" {
+			return errors.New("QQ Frontend Redirect URL is required when enabled")
+		}
+		if err := validateAbsoluteHTTPURL(qq.RedirectURL); err != nil {
+			return errors.New("QQ Redirect URL must be an absolute http(s) URL")
+		}
+		if err := validateFrontendRedirectURL(qq.FrontendRedirectURL); err != nil {
+			return errors.New("QQ Frontend Redirect URL must be an absolute http(s) URL or a relative path")
+		}
 		return nil
 	}
 	if linuxdo.ClientID == "" {
@@ -555,7 +842,65 @@ func (s *Store) validateSettingsUpdateLocked(data map[string]any) error {
 	default:
 		return errors.New("Linuxdo token auth method must be one of client_secret_post, client_secret_basic, none")
 	}
+	qq := s.qqOAuthFromData(data)
+	if !qq.Enabled {
+		return nil
+	}
+	if qq.ClientID == "" {
+		return errors.New("QQ App ID is required when enabled")
+	}
+	if qq.ClientSecret == "" {
+		return errors.New("QQ App Secret is required when enabled")
+	}
+	if qq.RedirectURL == "" {
+		return errors.New("QQ Redirect URL is required when enabled")
+	}
+	if qq.FrontendRedirectURL == "" {
+		return errors.New("QQ Frontend Redirect URL is required when enabled")
+	}
+	if err := validateAbsoluteHTTPURL(qq.RedirectURL); err != nil {
+		return errors.New("QQ Redirect URL must be an absolute http(s) URL")
+	}
+	if err := validateFrontendRedirectURL(qq.FrontendRedirectURL); err != nil {
+		return errors.New("QQ Frontend Redirect URL must be an absolute http(s) URL or a relative path")
+	}
+	social := s.socialLoginFromData(data)
+	if !social.Ready() {
+		return nil
+	}
+	if err := validateAbsoluteHTTPURL(social.BaseURL); err != nil {
+		return errors.New("聚合登录接口地址必须是绝对 http(s) URL")
+	}
+	if social.AppID == "" {
+		return errors.New("聚合登录 APPID 不能为空")
+	}
+	if social.AppKey == "" {
+		return errors.New("聚合登录 APPKEY 不能为空")
+	}
+	if social.RedirectURL == "" {
+		return errors.New("聚合登录后端回调地址不能为空")
+	}
+	if social.FrontendRedirectURL == "" {
+		return errors.New("聚合登录前端完成页不能为空")
+	}
+	if err := validateAbsoluteHTTPURL(social.RedirectURL); err != nil {
+		return errors.New("聚合登录后端回调地址必须是绝对 http(s) URL")
+	}
+	if err := validateFrontendRedirectURL(social.FrontendRedirectURL); err != nil {
+		return errors.New("聚合登录前端完成页必须是绝对 http(s) URL 或相对路径")
+	}
 	return nil
+}
+
+func (s *Store) normalizeTurnstileUpdateLocked(data map[string]any) {
+	if !util.ToBool(s.settingValueFromData(data, "turnstile_enabled", false)) {
+		return
+	}
+	siteKey := strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "turnstile_site_key", "")))
+	secretKey := strings.TrimSpace(fmt.Sprint(s.settingValueFromData(data, "turnstile_secret_key", "")))
+	if siteKey == "" || secretKey == "" {
+		data["turnstile_enabled"] = false
+	}
 }
 
 func normalizeUpdateRepo(value any) string {
@@ -627,9 +972,7 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 	for key, value := range updates {
-		if _, external := s.externalEnvKeys[key]; !external {
-			_ = os.Setenv(key, value)
-		}
+		_ = os.Setenv(key, value)
 	}
 	return nil
 }
@@ -653,16 +996,40 @@ func settingsFromEnvValues(values map[string]string) map[string]any {
 }
 
 func intSetting(value any, fallback int) int {
-	switch v := value.(type) {
-	case int:
-		return v
-	case string:
-		n, err := strconv.Atoi(strings.TrimSpace(v))
-		if err == nil {
-			return n
+	return util.ToInt(value, fallback)
+}
+
+func parseIntListSetting(value any, fallback []int) []int {
+	if list, ok := value.([]int); ok {
+		return append([]int(nil), list...)
+	}
+	if list, ok := value.([]any); ok {
+		out := make([]int, 0, len(list))
+		for _, item := range list {
+			out = append(out, intSetting(item, 0))
+		}
+		if len(out) > 0 {
+			return out
 		}
 	}
-	return fallback
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "" {
+		return append([]int(nil), fallback...)
+	}
+	parts := strings.FieldsFunc(text, func(r rune) bool {
+		return r == ',' || r == '，' || r == ' ' || r == '\n' || r == '\t'
+	})
+	out := make([]int, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) == "" {
+			continue
+		}
+		out = append(out, intSetting(part, 0))
+	}
+	if len(out) == 0 {
+		return append([]int(nil), fallback...)
+	}
+	return out
 }
 
 func floatSetting(value any, fallback float64) float64 {
@@ -703,6 +1070,14 @@ func normalizeImageTaskTimeoutSeconds(value any) int {
 		return maxImageTaskTimeoutSeconds
 	}
 	return seconds
+}
+
+func normalizeImageRetentionDays(value any) int {
+	days := intSetting(value, 30)
+	if days < 1 {
+		return 1
+	}
+	return days
 }
 
 func clampFloat(value, min, max float64) float64 {
@@ -795,6 +1170,12 @@ func stringifyEnvValue(value any) string {
 		return "false"
 	case []string:
 		return strings.Join(v, ",")
+	case []int:
+		items := make([]string, 0, len(v))
+		for _, item := range v {
+			items = append(items, strconv.Itoa(item))
+		}
+		return strings.Join(items, ",")
 	case []any:
 		items := make([]string, 0, len(v))
 		for _, item := range v {

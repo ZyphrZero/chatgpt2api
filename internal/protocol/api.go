@@ -22,12 +22,22 @@ type StreamResult struct {
 
 const xmlToolRule = "Tool output adapter: when calling tools, output ONLY this XML and no prose/markdown:\n<tool_calls><tool_call><tool_name>TOOL_NAME</tool_name><parameters><PARAM><![CDATA[value]]></PARAM></parameters></tool_call></tool_calls>"
 
+func allowCodexImageFallbackForModel(model string) bool {
+	switch strings.TrimSpace(model) {
+	case "", util.ImageModelAuto, util.ImageModelGPT:
+		return true
+	default:
+		return false
+	}
+}
+
 func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any) (map[string]any, *StreamResult, error) {
 	prompt := util.Clean(body["prompt"])
 	if prompt == "" {
 		return nil, nil, HTTPError{Status: 400, Message: "prompt is required"}
 	}
-	model := firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto)
+	rawModel := util.Clean(body["model"])
+	model := firstNonEmpty(rawModel, util.ImageModelAuto)
 	n, err := ParseImageCount(body["n"])
 	if err != nil {
 		return nil, nil, err
@@ -38,7 +48,7 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 	outputCompression, hasOutputCompression := normalizedImageOutputCompression(body["output_compression"])
 	responseFormat := firstNonEmpty(util.Clean(body["response_format"]), "b64_json")
 	baseURL := util.Clean(body["base_url"])
-	request := ConversationRequest{Prompt: prompt, Model: model, Messages: NormalizeMessages(util.AsMapSlice(body["messages"]), nil), N: n, Size: size, Quality: quality, OutputFormat: outputFormat, ResponseFormat: responseFormat, BaseURL: baseURL, OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), MessageAsError: true, RequirePaidAccount: RequiresPaidImageSize(size)}
+	request := ConversationRequest{Prompt: prompt, Model: model, Messages: NormalizeMessages(util.AsMapSlice(body["messages"]), nil), N: n, Size: size, Quality: quality, OutputFormat: outputFormat, ResponseFormat: responseFormat, BaseURL: baseURL, OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), MessageAsError: true, RequirePaidAccount: RequiresPaidImageSize(size), AllowCodexFallback: allowCodexImageFallbackForModel(rawModel)}
 	if hasOutputCompression {
 		request.OutputCompression = &outputCompression
 	}
@@ -47,7 +57,7 @@ func (e *Engine) HandleImageGenerations(ctx context.Context, body map[string]any
 	if util.ToBool(body["stream"]) {
 		return nil, &StreamResult{Items: StreamImageChunks(outputs), Err: errCh, Kind: "openai"}, nil
 	}
-	result, err := e.CollectImageOutputs(outputs, errCh)
+	result, err := e.CollectImageOutputsWithLimit(outputs, errCh, request.N)
 	return result, nil, err
 }
 
@@ -57,9 +67,10 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 		return nil, nil, &ImageGenerationError{Message: "image is required", StatusCode: 502, Type: "server_error", Code: "upstream_error"}
 	}
 	size := util.Clean(body["size"])
+	rawModel := util.Clean(body["model"])
 	request := ConversationRequest{
 		Prompt:             util.Clean(body["prompt"]),
-		Model:              firstNonEmpty(util.Clean(body["model"]), util.ImageModelAuto),
+		Model:              firstNonEmpty(rawModel, util.ImageModelAuto),
 		N:                  util.ToInt(body["n"], 1),
 		Size:               size,
 		Quality:            util.Clean(body["quality"]),
@@ -72,6 +83,7 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 		Images:             encoded,
 		MessageAsError:     true,
 		RequirePaidAccount: RequiresPaidImageSize(size),
+		AllowCodexFallback: allowCodexImageFallbackForModel(rawModel),
 	}
 	if compression, ok := normalizedImageOutputCompression(body["output_compression"]); ok {
 		request.OutputCompression = &compression
@@ -81,7 +93,7 @@ func (e *Engine) HandleImageEdits(ctx context.Context, body map[string]any, imag
 	if util.ToBool(body["stream"]) {
 		return nil, &StreamResult{Items: StreamImageChunks(outputs), Err: errCh, Kind: "openai"}, nil
 	}
-	result, err := e.CollectImageOutputs(outputs, errCh)
+	result, err := e.CollectImageOutputsWithLimit(outputs, errCh, request.N)
 	return result, nil, err
 }
 
@@ -103,26 +115,26 @@ func (e *Engine) HandleChatCompletions(ctx context.Context, body map[string]any)
 		if IsImageChatRequest(body) {
 			items, errCh = e.ImageChatEvents(ctx, body)
 		} else {
-			model, messages, err := TextChatParts(body)
+			request, err := TextChatRequestFromBody(body)
 			if err != nil {
 				return nil, nil, err
 			}
-			items, errCh = e.StreamTextChatCompletion(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), messages, model)
+			items, errCh = e.StreamTextChatCompletionWithPoolRequest(ctx, request)
 		}
 		return nil, &StreamResult{Items: items, Err: errCh, Kind: "openai"}, nil
 	}
 	if IsImageChatRequest(body) {
 		return e.ImageChatResponse(ctx, body)
 	}
-	model, messages, err := TextChatParts(body)
+	request, err := TextChatRequestFromBody(body)
 	if err != nil {
 		return nil, nil, err
 	}
-	text, err := e.CollectText(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), ConversationRequest{Model: model, Messages: messages})
+	text, err := e.CollectTextWithPool(ctx, request)
 	if err != nil {
 		return nil, nil, err
 	}
-	return CompletionResponse(model, text, 0, messages), nil, nil
+	return CompletionResponse(request.Model, text, 0, request.Messages), nil, nil
 }
 
 func CompletionChunk(model string, delta map[string]any, finishReason any, completionID string, created int64) map[string]any {
@@ -182,6 +194,137 @@ func (e *Engine) StreamTextChatCompletion(ctx context.Context, client *backend.C
 	return out, errOut
 }
 
+func (e *Engine) StreamTextChatCompletionWithPool(ctx context.Context, messages []map[string]any, model string) (<-chan map[string]any, <-chan error) {
+	return e.StreamTextChatCompletionWithPoolRequest(ctx, ConversationRequest{Model: model, Messages: messages})
+}
+
+func (e *Engine) StreamTextChatCompletionWithPoolRequest(ctx context.Context, request ConversationRequest) (<-chan map[string]any, <-chan error) {
+	out := make(chan map[string]any)
+	errOut := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errOut)
+		attempted := map[string]struct{}{}
+		lastError := ""
+		for {
+			token := e.textAccessTokenForRequest(request, attempted)
+			if token == "" {
+				if lastError != "" {
+					errOut <- NewImageGenerationError(lastError)
+					return
+				}
+				errOut <- NewImageGenerationError(noTextAccountMessage(request))
+				return
+			}
+			attempted[token] = struct{}{}
+			items, itemErr := e.StreamTextChatCompletion(ctx, e.TextBackend(token), request.Messages, request.Model)
+			emitted := false
+			for item := range items {
+				emitted = true
+				out <- item
+			}
+			err := <-itemErr
+			if err == nil {
+				errOut <- nil
+				return
+			}
+			lastError = err.Error()
+			if normalized, handled := e.Accounts.ApplyAccountErrorMessage(token, "text_stream", lastError); handled {
+				lastError = normalized
+				if !emitted {
+					continue
+				}
+			}
+			errOut <- err
+			return
+		}
+	}()
+	return out, errOut
+}
+
+func (e *Engine) StreamTextDeltasWithPool(ctx context.Context, request ConversationRequest) (<-chan string, <-chan error) {
+	out := make(chan string)
+	errOut := make(chan error, 1)
+	go func() {
+		defer close(out)
+		defer close(errOut)
+		attempted := map[string]struct{}{}
+		lastError := ""
+		for {
+			token := e.textAccessTokenForRequest(request, attempted)
+			if token == "" {
+				if lastError != "" {
+					errOut <- NewImageGenerationError(lastError)
+					return
+				}
+				errOut <- NewImageGenerationError(noTextAccountMessage(request))
+				return
+			}
+			attempted[token] = struct{}{}
+			deltas, deltaErr := e.StreamTextDeltas(ctx, e.TextBackend(token), request)
+			emitted := false
+			for delta := range deltas {
+				emitted = true
+				out <- delta
+			}
+			err := <-deltaErr
+			if err == nil {
+				errOut <- nil
+				return
+			}
+			lastError = err.Error()
+			if normalized, handled := e.Accounts.ApplyAccountErrorMessage(token, "text_stream", lastError); handled {
+				lastError = normalized
+				if !emitted {
+					continue
+				}
+			}
+			errOut <- err
+			return
+		}
+	}()
+	return out, errOut
+}
+
+func (e *Engine) CollectTextWithPool(ctx context.Context, request ConversationRequest) (string, error) {
+	attempted := map[string]struct{}{}
+	lastError := ""
+	for {
+		token := e.textAccessTokenForRequest(request, attempted)
+		if token == "" {
+			if lastError != "" {
+				return "", NewImageGenerationError(lastError)
+			}
+			return "", NewImageGenerationError(noTextAccountMessage(request))
+		}
+		attempted[token] = struct{}{}
+		text, err := e.CollectText(ctx, e.TextBackend(token), request)
+		if err == nil {
+			return text, nil
+		}
+		lastError = err.Error()
+		if normalized, handled := e.Accounts.ApplyAccountErrorMessage(token, "text_stream", lastError); handled {
+			lastError = normalized
+			continue
+		}
+		return "", err
+	}
+}
+
+func (e *Engine) textAccessTokenForRequest(request ConversationRequest, attempted map[string]struct{}) string {
+	if request.VisionRequired {
+		return e.Accounts.GetVisionAccessTokenExcluding(attempted)
+	}
+	return e.Accounts.GetTextAccessTokenExcluding(attempted)
+}
+
+func noTextAccountMessage(request ConversationRequest) string {
+	if request.VisionRequired {
+		return "no available vision account"
+	}
+	return "no available text account"
+}
+
 func ChatMessagesFromBody(body map[string]any) ([]map[string]any, error) {
 	if messages := util.AsMapSlice(body["messages"]); len(messages) > 0 {
 		return messages, nil
@@ -193,12 +336,29 @@ func ChatMessagesFromBody(body map[string]any) ([]map[string]any, error) {
 }
 
 func TextChatParts(body map[string]any) (string, []map[string]any, error) {
-	model := firstNonEmpty(util.Clean(body["model"]), "auto")
-	messages, err := ChatMessagesFromBody(body)
+	request, err := TextChatRequestFromBody(body)
 	if err != nil {
 		return "", nil, err
 	}
-	return model, NormalizeMessages(messages, nil), nil
+	return request.Model, request.Messages, nil
+}
+
+func TextChatRequestFromBody(body map[string]any) (ConversationRequest, error) {
+	model := firstNonEmpty(util.Clean(body["model"]), "auto")
+	messages, err := ChatMessagesFromBody(body)
+	if err != nil {
+		return ConversationRequest{}, err
+	}
+	return ConversationRequest{Model: model, Messages: NormalizeConversationMessages(messages, nil), VisionRequired: ChatMessagesHaveImages(messages)}, nil
+}
+
+func ChatMessagesHaveImages(messages []map[string]any) bool {
+	for _, message := range messages {
+		if len(ExtractImagesFromMessageContent(message["content"])) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func IsImageChatRequest(body map[string]any) bool {
@@ -219,7 +379,7 @@ func (e *Engine) ImageChatResponse(ctx context.Context, body map[string]any) (ma
 		return nil, nil, err
 	}
 	size := util.Clean(body["size"])
-	request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), RequirePaidAccount: RequiresPaidImageSize(size)}
+	request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), RequirePaidAccount: RequiresPaidImageSize(size), AllowCodexFallback: allowCodexImageFallbackForModel(util.Clean(body["model"]))}
 	applyImageOutputOptionsToRequest(&request, ImageOutputOptionsFromPayload(body))
 	outputs, errCh := e.StreamImageOutputsWithPool(ctx, request.Normalized())
 	result, err := e.CollectImageOutputs(outputs, errCh)
@@ -241,7 +401,7 @@ func (e *Engine) ImageChatEvents(ctx context.Context, body map[string]any) (<-ch
 			return
 		}
 		size := util.Clean(body["size"])
-		request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), RequirePaidAccount: RequiresPaidImageSize(size)}
+		request := ConversationRequest{Prompt: prompt, Model: model, Messages: messages, N: n, Size: size, Quality: util.Clean(body["quality"]), ResponseFormat: "b64_json", OwnerID: util.Clean(body["owner_id"]), OwnerName: util.Clean(body["owner_name"]), Images: EncodeImages(images), RequirePaidAccount: RequiresPaidImageSize(size), AllowCodexFallback: allowCodexImageFallbackForModel(util.Clean(body["model"]))}
 		applyImageOutputOptionsToRequest(&request, ImageOutputOptionsFromPayload(body))
 		outputs, errCh := e.StreamImageOutputsWithPool(ctx, request.Normalized())
 		id := "chatcmpl-" + util.NewHex(32)
@@ -564,6 +724,8 @@ func ResponseImageGenerationRequest(body map[string]any, scope string, previous 
 		Images:             images,
 		RequirePaidAccount: RequiresPaidImageSize(size),
 		ResponsesImageTool: true,
+		AllowCodexFallback: allowCodexImageFallbackForModel(responseModel),
+		MaxImageWorkers:    util.ToInt(body["max_image_workers"], 0),
 	}
 	if outputFormat != "png" {
 		if compression, ok := normalizedImageOutputCompression(firstNonNil(tool["output_compression"], body["output_compression"])); ok {
@@ -580,7 +742,7 @@ func (e *Engine) StreamTextResponse(ctx context.Context, body map[string]any) (<
 }
 
 func (e *Engine) StreamTextResponseWithMessages(ctx context.Context, model string, messages []map[string]any) (<-chan map[string]any, <-chan error) {
-	deltas, errCh := e.StreamTextDeltas(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), ConversationRequest{Model: model, Messages: messages})
+	deltas, errCh := e.StreamTextDeltasWithPool(ctx, ConversationRequest{Model: model, Messages: messages})
 	return streamTextResponseEvents(ctx, model, deltas, errCh)
 }
 
@@ -877,7 +1039,7 @@ func (e *Engine) HandleMessages(ctx context.Context, body map[string]any) (map[s
 		items, errCh := e.StreamAnthropicEvents(ctx, request)
 		return nil, &StreamResult{Items: items, Err: errCh, Kind: "anthropic"}, nil
 	}
-	items, errCh := e.StreamTextChatCompletion(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), request.Messages, request.Model)
+	items, errCh := e.StreamTextChatCompletionWithPoolRequest(ctx, ConversationRequest{Model: request.Model, Messages: request.Messages, VisionRequired: request.VisionRequired})
 	text := CollectChatContent(items)
 	if err := <-errCh; err != nil {
 		return nil, nil, err
@@ -886,16 +1048,18 @@ func (e *Engine) HandleMessages(ctx context.Context, body map[string]any) (map[s
 }
 
 type MessageRequest struct {
-	Messages []map[string]any
-	Model    string
-	Tools    any
+	Messages       []map[string]any
+	Model          string
+	Tools          any
+	VisionRequired bool
 }
 
 func MessageRequestFromBody(e *Engine, body map[string]any) MessageRequest {
 	payload := util.CopyMap(body)
 	payload["messages"] = PreprocessMessages(payload["messages"])
 	payload["system"] = MergeSystem(payload["system"], BuildToolPrompt(payload["tools"]))
-	return MessageRequest{Messages: NormalizeMessages(payload["messages"], payload["system"]), Model: firstNonEmpty(util.Clean(payload["model"]), "auto"), Tools: payload["tools"]}
+	messages := NormalizeConversationMessages(payload["messages"], payload["system"])
+	return MessageRequest{Messages: messages, Model: firstNonEmpty(util.Clean(payload["model"]), "auto"), Tools: payload["tools"], VisionRequired: ChatMessagesHaveImages(messages)}
 }
 
 func BuildToolPrompt(tools any) string {
@@ -1052,7 +1216,7 @@ func ContentBlocks(text string, tools any) ([]map[string]any, string) {
 }
 
 func (e *Engine) StreamAnthropicEvents(ctx context.Context, request MessageRequest) (<-chan map[string]any, <-chan error) {
-	chunks, errCh := e.StreamTextChatCompletion(ctx, e.TextBackend(e.Accounts.GetTextAccessToken()), request.Messages, request.Model)
+	chunks, errCh := e.StreamTextChatCompletionWithPoolRequest(ctx, ConversationRequest{Model: request.Model, Messages: request.Messages, VisionRequired: request.VisionRequired})
 	out := make(chan map[string]any)
 	outErr := make(chan error, 1)
 	go func() {

@@ -15,6 +15,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,11 +43,13 @@ const (
 	registerSentinelSDK              = registerSentinelBase + "/sentinel/20260124ceb8/sdk.js"
 	registerSentinelMaxAttempts      = 500000
 	registerSentinelErrorPrefix      = "wQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D"
+	registerTokenExchangeMaxAttempts = 2
 )
 
 var (
-	registerFirstNames = []string{"James", "Robert", "John", "Michael", "David", "Mary", "Emma", "Olivia"}
-	registerLastNames  = []string{"Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller"}
+	registerFirstNames       = []string{"James", "Robert", "John", "Michael", "David", "Mary", "Emma", "Olivia"}
+	registerLastNames        = []string{"Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller"}
+	registerOAuthCodePattern = regexp.MustCompile(`(?i)(?:[?&]|&amp;|%3f|%26)code(?:=|%3d)([A-Za-z0-9._~%+-]+)`)
 )
 
 type RegisterService struct {
@@ -267,7 +270,7 @@ func (s *RegisterService) runWorker(index int, config map[string]any) registerWo
 	}
 	if s.accounts != nil {
 		s.accounts.AddAccounts([]string{accessToken})
-		s.accounts.RefreshAccounts(context.Background(), []string{accessToken})
+		go s.accounts.RefreshAccounts(context.Background(), []string{accessToken})
 	}
 	s.appendLog(fmt.Sprintf("%s 注册成功，本次耗时%.1fs", util.Clean(result["email"]), cost), "green")
 	return registerWorkerResult{ok: true, index: index, result: result, cost: cost}
@@ -359,7 +362,7 @@ func (w *registerWorker) run(ctx context.Context) (map[string]any, error) {
 	if err := w.createAccount(ctx, firstName+" "+lastName, registerRandomBirthdate()); err != nil {
 		return nil, err
 	}
-	tokens, err := w.loginAndExchangeTokens(ctx, email, password, mailbox)
+	tokens, err := w.loginAndExchangeTokensWithRetry(ctx, email, password, mailbox)
 	if err != nil {
 		return nil, err
 	}
@@ -391,6 +394,9 @@ func registerResponseDetail(payload map[string]any) string {
 	if len(payload) == 0 {
 		return ""
 	}
+	if summary := registerHTMLChallengeSummary(payload); summary != "" {
+		return ", detail=" + summary
+	}
 	data, err := json.Marshal(payload)
 	if err != nil || len(data) == 0 {
 		return ""
@@ -398,8 +404,54 @@ func registerResponseDetail(payload map[string]any) string {
 	return ", detail=" + string(data)
 }
 
+func registerHTMLChallengeSummary(payload map[string]any) string {
+	body := strings.TrimSpace(util.Clean(payload["body"]))
+	if body == "" {
+		return ""
+	}
+	lower := strings.ToLower(body)
+	if strings.Contains(lower, "cf_chl") ||
+		strings.Contains(lower, "challenge-platform") ||
+		strings.Contains(lower, "just a moment") ||
+		strings.Contains(lower, "enable javascript and cookies to continue") ||
+		strings.Contains(lower, "cloudflare") {
+		return `{"body":"upstream returned Cloudflare challenge page"}`
+	}
+	if strings.Contains(lower, "<html") || strings.Contains(lower, "<!doctype html") || strings.Contains(lower, "<body") {
+		return `{"body":"upstream returned HTML error page"}`
+	}
+	return ""
+}
+
 func registerFailedToCreateAccount(payload map[string]any) bool {
 	return util.Clean(payload["message"]) == "Failed to create account. Please try again."
+}
+
+func registerNeedsEmailOTP(payload map[string]any, continueURL string) bool {
+	page := util.StringMap(payload["page"])
+	pageType := util.Clean(page["type"])
+	if pageType == "email_otp_verification" {
+		return true
+	}
+	text := strings.ToLower(continueURL + " " + util.Clean(payload["body"]))
+	if strings.Contains(text, "email-verification") || strings.Contains(text, "email-otp") || strings.Contains(text, "email_otp") {
+		return true
+	}
+	if len(payload) > 0 {
+		data, err := json.Marshal(payload)
+		if err == nil {
+			lower := strings.ToLower(string(data))
+			return strings.Contains(lower, "email_otp") || strings.Contains(lower, "verification code")
+		}
+	}
+	return false
+}
+
+func registerInvalidState(payload map[string]any) bool {
+	errPayload := util.StringMap(payload["error"])
+	code := strings.ToLower(util.Clean(errPayload["code"]))
+	message := strings.ToLower(util.Clean(errPayload["message"]))
+	return code == "invalid_state" || strings.Contains(message, "invalid session")
 }
 
 func (w *registerWorker) platformAuthorize(ctx context.Context, email string) error {
@@ -488,16 +540,76 @@ func (w *registerWorker) createAccount(ctx context.Context, name, birthdate stri
 	return nil
 }
 
+func (w *registerWorker) loginAndExchangeTokensWithRetry(ctx context.Context, email, password string, mailbox map[string]any) (map[string]any, error) {
+	var lastErr error
+	for attempt := 1; attempt <= registerTokenExchangeMaxAttempts; attempt++ {
+		loginWorker, err := w.newLoginSession()
+		if err != nil {
+			return nil, err
+		}
+		tokens, err := loginWorker.loginAndExchangeTokens(ctx, email, password, mailbox)
+		loginWorker.close()
+		if err == nil {
+			return tokens, nil
+		}
+		lastErr = err
+		if !registerShouldRetryLoginExchange(err) || attempt == registerTokenExchangeMaxAttempts {
+			return nil, err
+		}
+		w.step("登录换 token 状态失效，重建会话重试")
+		time.Sleep(registerJitterDelay(400*time.Millisecond, 1200*time.Millisecond))
+	}
+	return nil, lastErr
+}
+
+func (w *registerWorker) newLoginSession() (*registerWorker, error) {
+	deviceID := util.NewUUID()
+	client, err := registerHTTPClient(util.Clean(w.config["proxy"]), 60*time.Second, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	if w.client != nil && w.client.Transport != nil {
+		if _, ok := w.client.Transport.(*http.Transport); !ok {
+			client.Transport = w.client.Transport
+		}
+	}
+	return &registerWorker{
+		service:  w.service,
+		index:    w.index,
+		config:   w.config,
+		mail:     w.mail,
+		client:   client,
+		deviceID: deviceID,
+	}, nil
+}
+
+func registerShouldRetryLoginExchange(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "invalid_state") ||
+		strings.Contains(message, "invalid session") ||
+		strings.Contains(message, "token exchange callback code not found")
+}
+
+func registerJitterDelay(minDelay, maxDelay time.Duration) time.Duration {
+	if maxDelay <= minDelay {
+		return minDelay
+	}
+	return minDelay + time.Duration(mathrand.Int63n(int64(maxDelay-minDelay)))
+}
+
 func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, password string, mailbox map[string]any) (map[string]any, error) {
 	w.step("开始独立登录换 token")
 	codeVerifier, codeChallenge := generateRegisterPKCE()
 	values := registerAuthorizeParams(email, w.deviceID, registerRandomToken(), registerRandomToken(), codeChallenge)
-	status, _, err := w.request(ctx, http.MethodGet, registerAuthBase+"/api/accounts/authorize?"+values.Encode(), nil, w.navigateHeaders(registerPlatformBase+"/"), true)
+	status, payload, err := w.request(ctx, http.MethodGet, registerAuthBase+"/api/accounts/authorize?"+values.Encode(), nil, w.navigateHeaders(registerPlatformBase+"/"), true)
 	if err != nil {
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("platform_login_authorize_http_%d", status)
+		return nil, fmt.Errorf("platform_login_authorize_http_%d%s", status, registerAuthorizeErrorDetail(payload))
 	}
 	w.step("登录 authorize 完成")
 	headers := w.jsonHeaders(registerAuthBase + "/log-in/password")
@@ -506,19 +618,29 @@ func (w *registerWorker) loginAndExchangeTokens(ctx context.Context, email, pass
 		return nil, err
 	}
 	headers["openai-sentinel-token"] = token
-	status, payload, err := w.request(ctx, http.MethodPost, registerAuthBase+"/api/accounts/password/verify", map[string]any{
+	status, payload, err = w.request(ctx, http.MethodPost, registerAuthBase+"/api/accounts/password/verify", map[string]any{
 		"password": password,
 	}, headers, false)
 	if err != nil {
 		return nil, err
 	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("password_verify_http_%d", status)
-	}
-	w.step("密码校验完成")
 	continueURL := util.Clean(payload["continue_url"])
-	page := util.StringMap(payload["page"])
-	if util.Clean(page["type"]) == "email_otp_verification" || strings.Contains(continueURL, "email-verification") || strings.Contains(continueURL, "email-otp") {
+	if status != http.StatusOK {
+		if status == http.StatusUnauthorized || status == http.StatusConflict {
+			if registerNeedsEmailOTP(payload, continueURL) {
+				w.step(fmt.Sprintf("密码校验进入邮箱验证码分支（HTTP %d）", status))
+			} else if registerInvalidState(payload) {
+				return nil, fmt.Errorf("password_verify_http_%d%s", status, registerResponseDetail(payload))
+			} else {
+				return nil, fmt.Errorf("password_verify_http_%d%s", status, registerResponseDetail(payload))
+			}
+		} else {
+			return nil, fmt.Errorf("password_verify_http_%d%s", status, registerResponseDetail(payload))
+		}
+	} else {
+		w.step("密码校验完成")
+	}
+	if registerNeedsEmailOTP(payload, continueURL) {
 		w.step("独立登录需要邮箱验证码")
 		code, waitErr := waitRegisterCode(ctx, w.mail, mailbox)
 		if waitErr != nil {
@@ -578,6 +700,9 @@ func (w *registerWorker) followConsentForCode(ctx context.Context, continueURL s
 	if strings.HasPrefix(current, "/") {
 		current = registerAuthBase + current
 	}
+	if code := registerOAuthCode(current); code != "" {
+		return code, nil
+	}
 	noRedirect := *w.client
 	noRedirect.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
@@ -594,6 +719,7 @@ func (w *registerWorker) followConsentForCode(ctx context.Context, continueURL s
 		if err != nil {
 			return "", err
 		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 32768))
 		resp.Body.Close()
 		if code := registerOAuthCode(resp.Request.URL.String()); code != "" {
 			return code, nil
@@ -601,6 +727,12 @@ func (w *registerWorker) followConsentForCode(ctx context.Context, continueURL s
 		location := strings.TrimSpace(resp.Header.Get("Location"))
 		if code := registerOAuthCode(location); code != "" {
 			return code, nil
+		}
+		if code := registerOAuthCode(string(body)); code != "" {
+			return code, nil
+		}
+		if location == "" {
+			location = registerRefreshLocation(resp.Header.Get("Refresh"))
 		}
 		if location == "" || (resp.StatusCode < 300 || resp.StatusCode >= 400) {
 			break
@@ -1297,11 +1429,55 @@ func registerOAuthCode(target string) string {
 	if strings.TrimSpace(target) == "" {
 		return ""
 	}
-	parsed, err := url.Parse(target)
-	if err != nil {
+	for _, candidate := range registerOAuthCodeCandidates(target) {
+		parsed, err := url.Parse(candidate)
+		if err != nil {
+			continue
+		}
+		if code := strings.TrimSpace(parsed.Query().Get("code")); code != "" {
+			return code
+		}
+		if parsed.Fragment != "" {
+			values, parseErr := url.ParseQuery(parsed.Fragment)
+			if parseErr == nil {
+				if code := strings.TrimSpace(values.Get("code")); code != "" {
+					return code
+				}
+			}
+		}
+	}
+	if match := registerOAuthCodePattern.FindStringSubmatch(target); len(match) > 1 {
+		code, decodeErr := url.QueryUnescape(match[1])
+		if decodeErr == nil {
+			return strings.TrimSpace(code)
+		}
+		return strings.TrimSpace(match[1])
+	}
+	return ""
+}
+
+func registerOAuthCodeCandidates(target string) []string {
+	target = strings.TrimSpace(target)
+	candidates := []string{target}
+	if decoded, err := url.QueryUnescape(target); err == nil && decoded != target {
+		candidates = append(candidates, decoded)
+	}
+	return candidates
+}
+
+func registerRefreshLocation(header string) string {
+	header = strings.TrimSpace(header)
+	if header == "" {
 		return ""
 	}
-	return strings.TrimSpace(parsed.Query().Get("code"))
+	for _, part := range strings.Split(header, ";") {
+		key, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), "url") {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(value), `"'`)
+	}
+	return ""
 }
 
 func resolveRegisterLocation(baseURL, location string) (string, error) {

@@ -1,5 +1,5 @@
 export type BananaPromptMode = "generate" | "edit";
-export type PromptMarketSourceId = "banana-prompt-quicker" | "awesome-gpt-image-2-prompts";
+export type PromptMarketSourceId = "public-image-gallery" | "banana-prompt-quicker" | "awesome-gpt-image-2-prompts";
 export type PromptMarketLanguage = "zh-CN" | "en";
 
 export type PromptMarketLocalization = {
@@ -43,6 +43,10 @@ export const PROMPT_MARKET_SOURCE_OPTIONS: {
   value: PromptMarketSourceId;
   label: string;
 }[] = [
+  {
+    value: "public-image-gallery",
+    label: "公开图库",
+  },
   {
     value: "banana-prompt-quicker",
     label: "banana-prompt-quicker",

@@ -15,17 +15,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v6
         with:
-          bun-version: latest
-
-      - name: Install dependencies
-        working-directory: web
-        run: bun install --frozen-lockfile
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
 
       - name: Build frontend
         working-directory: web
-        run: bun run build
+        run: |
+          npm ci
+          npm run build
 
       - uses: actions/setup-go@v6
         with:
@@ -37,3 +37,9 @@ jobs:
 
       - name: Test backend
         run: go test ./...
+
+      - name: Build release binary
+        run: go build -trimpath -tags=embed -o chatgpt2api ./internal
+
+      - name: Build release Docker image
+        run: docker build -f deploy/Dockerfile.release -t chatgpt2api:ci .

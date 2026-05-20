@@ -232,7 +232,7 @@ export function ImageLightbox({
           >
             <img
               src={current.src}
-              alt=""
+              alt={`图片预览 ${currentIndex + 1}`}
               className={cn(
                 "max-h-[90vh] max-w-[90vw] rounded-lg object-contain transition-transform duration-100",
                 zoom > MIN_ZOOM ? "cursor-grab touch-none active:cursor-grabbing" : "cursor-zoom-in",

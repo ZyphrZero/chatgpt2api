@@ -1,0 +1,13 @@
+services:
+  app:
+    image: ${CHATGPT2API_IMAGE:-chatgpt2api:local}
+    pull_policy: ${CHATGPT2API_PULL_POLICY:-never}
+    container_name: chatgpt2api
+    restart: unless-stopped
+    ports:
+      - "${CHATGPT2API_PORT:-3000}:80"
+    env_file:
+      - ${CHATGPT2API_ENV_FILE:-../.env}
+    volumes:
+      - ${CHATGPT2API_DATA_DIR:-../data}:/app/data
+      - ${CHATGPT2API_ENV_FILE:-../.env}:/app/.env

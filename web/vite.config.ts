@@ -22,5 +22,34 @@ export default defineConfig({
   build: {
     outDir: "../internal/web/dist",
     emptyOutDir: true,
+    chunkSizeWarningLimit: 1200,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) {
+            return "vendor-react";
+          }
+          if (id.includes("@radix-ui")) return "vendor-radix";
+          if (id.includes("lucide-react")) return "vendor-lucide";
+          if (
+            id.includes("react-markdown") ||
+            id.includes("remark") ||
+            id.includes("rehype") ||
+            id.includes("micromark") ||
+            id.includes("hast") ||
+            id.includes("mdast") ||
+            id.includes("unified") ||
+            id.includes("unist")
+          ) {
+            return "vendor-markdown";
+          }
+          if (id.includes("zustand") || id.includes("immer")) return "vendor-state";
+          if (id.includes("axios") || id.includes("ky/")) return "vendor-http";
+          if (id.includes("recharts") || id.includes("d3-")) return "vendor-charts";
+          return "vendor";
+        },
+      },
+    },
   },
 });

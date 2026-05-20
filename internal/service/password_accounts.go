@@ -320,6 +320,60 @@ func (s *AuthService) ChangeProfilePassword(identity Identity, currentPassword, 
 	return authError("password account not found")
 }
 
+func (s *AuthService) ResetUserPassword(id, nextPassword string) (map[string]any, error) {
+	id = util.Clean(id)
+	if id == "" {
+		return nil, authError("user id is required")
+	}
+	if err := validateAccountPassword(nextPassword); err != nil {
+		return nil, err
+	}
+	hash, err := hashAccountPassword(nextPassword)
+	if err != nil {
+		return nil, err
+	}
+	now := util.NowISO()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+	for index, account := range s.accounts {
+		if account.ID != id || account.Role != AuthRoleUser {
+			continue
+		}
+		account.PasswordHash = hash
+		account.UpdatedAt = now
+		s.accounts[index] = account
+		changed = true
+		break
+	}
+	if !changed {
+		return nil, authError("password account not found")
+	}
+
+	nextItems := s.items[:0]
+	itemsChanged := false
+	for _, item := range s.items {
+		if util.Clean(item["kind"]) == AuthKindSession &&
+			util.Clean(item["provider"]) == AuthProviderLocal &&
+			util.Clean(item["owner_id"]) == id {
+			itemsChanged = true
+			continue
+		}
+		nextItems = append(nextItems, item)
+	}
+	s.items = nextItems
+	if err := s.savePasswordAccountsLocked(); err != nil {
+		return nil, err
+	}
+	if itemsChanged {
+		if err := s.saveLocked(); err != nil {
+			return nil, err
+		}
+	}
+	return managedAuthUserByIDLocked(s.items, s.roles, s.accounts, id), nil
+}
+
 func (s *AuthService) issuePasswordSessionLocked(account PasswordAccount, now string) (map[string]any, string) {
 	raw := "sess-" + util.RandomTokenURL(32)
 	owner := AuthOwner{

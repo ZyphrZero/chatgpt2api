@@ -1,9 +1,0 @@
-services:
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        VERSION: ${CHATGPT2API_VERSION:-0.0.0-dev}
-    image: ${CHATGPT2API_LOCAL_IMAGE:-chatgpt2api:local}
-    pull_policy: build

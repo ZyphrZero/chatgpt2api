@@ -172,6 +172,64 @@ function formatRestoreAt(value?: string | null) {
   return { absolute, relative };
 }
 
+function formatDateTime(value?: string | null) {
+  if (!value) {
+    return "—";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function formatDurationSince(value?: string | null) {
+  if (!value) {
+    return "—";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "—";
+  }
+  const diffMs = Math.max(0, Date.now() - date.getTime());
+  const totalMinutes = Math.floor(diffMs / 60000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) {
+    return `${days}d ${hours}h`;
+  }
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  return `${minutes}m`;
+}
+
+function formatCooldownUntil(value?: string | null) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  const diffMs = date.getTime() - Date.now();
+  if (diffMs <= 0) {
+    return "冷却结束，待重新心跳";
+  }
+  const totalMinutes = Math.ceil(diffMs / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `冷却 ${hours}h ${minutes}m` : `冷却 ${minutes}m`;
+}
+
 function formatQuotaSummary(accounts: Account[]) {
   const availableAccounts = accounts.filter((account) => account.status === "正常");
   if (availableAccounts.some(isUnlimitedImageQuotaAccount)) {
@@ -212,6 +270,11 @@ function normalizeAccounts(items: Account[] | null | undefined): Account[] {
       item.type === "Free"
         ? item.type
         : "Free",
+    checkedAt: item.checkedAt ?? null,
+    checkFailedAt: item.checkFailedAt ?? null,
+    checkCooldownUntil: item.checkCooldownUntil ?? null,
+    checkError: item.checkError ?? null,
+    lastUsedAt: item.lastUsedAt ?? null,
   }));
 }
 
@@ -239,6 +302,36 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
   const canUpdateAccount = hasAPIPermission(session, "POST", "/api/accounts/update");
   const canDeleteAccounts = hasAPIPermission(session, "DELETE", "/api/accounts");
   const canExportTokens = hasAPIPermission(session, "GET", "/api/accounts/tokens");
+
+  const renderHeartbeatInfo = (account: Account) => {
+    const cooldown = formatCooldownUntil(account.checkCooldownUntil);
+    const hasError = Boolean(account.checkError);
+    if (hasError) {
+      const failedAt = account.checkFailedAt || account.checkedAt;
+      return (
+        <div className="space-y-0.5 text-xs leading-5 text-muted-foreground">
+          <div className="font-medium text-rose-600">心跳失败 {formatDateTime(failedAt)}</div>
+          {account.checkedAt ? <div>上次成功 {formatDateTime(account.checkedAt)}</div> : null}
+          {account.lastUsedAt ? <div>调用 {formatDateTime(account.lastUsedAt)}</div> : null}
+          <div className={cooldown.startsWith("冷却结束") ? "text-amber-600" : "text-orange-600"}>
+            {cooldown || "待重新心跳"}
+          </div>
+          <div className="max-w-[14rem] truncate text-rose-600" title={account.checkError || undefined}>
+            {account.checkError}
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="space-y-0.5 text-xs leading-5 text-muted-foreground">
+        <div className="font-medium text-foreground">心跳 {formatDateTime(account.checkedAt)}</div>
+        <div>存活 {formatDurationSince(account.checkedAt)}</div>
+        {account.lastUsedAt ? <div>调用 {formatDateTime(account.lastUsedAt)}</div> : null}
+        {cooldown ? <div className="text-amber-600">{cooldown}</div> : null}
+        {!account.checkedAt ? <div>等待检查</div> : null}
+      </div>
+    );
+  };
 
   const applyAccountItems = useCallback((items: Account[] | null | undefined) => {
     const nextAccounts = normalizeAccounts(items);
@@ -366,7 +459,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
       if (data.errors.length > 0) {
         const firstError = data.errors[0]?.error;
         toast.error(
-          `刷新成功 ${data.refreshed} 个，失败 ${data.errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
+          `刷新成功 ${data.refreshed} 个，失败 ${data.errors.length} 个，失败账号已标记冷却，不会自动删除${firstError ? `，首个错误：${firstError}` : ""}`,
         );
       } else {
         toast.success(`刷新成功 ${data.refreshed} 个账户`);
@@ -509,7 +602,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
             <div className="space-y-2">
               <label className="text-sm font-medium text-stone-700">状态</label>
               <Select value={editStatus} onValueChange={(value) => setEditStatus(value as AccountStatus)}>
-                <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
+                <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white" aria-label="编辑账号状态">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -526,7 +619,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
             <div className="space-y-2">
               <label className="text-sm font-medium text-stone-700">类型</label>
               <Select value={editType} onValueChange={(value) => setEditType(value as AccountType)}>
-                <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
+                <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white" aria-label="编辑账号类型">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -546,6 +639,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                 value={editQuota}
                 onChange={(event) => setEditQuota(event.target.value)}
                 className="h-11 rounded-xl border-stone-200 bg-white"
+                aria-label="编辑账号额度"
               />
             </div>
           </div>
@@ -614,6 +708,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                 }}
                 placeholder="搜索邮箱"
                 className="h-10 pl-10"
+                aria-label="搜索账号邮箱"
               />
             </div>
             <Select
@@ -623,7 +718,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                 setPage(1);
               }}
             >
-              <SelectTrigger className="h-10 w-full lg:w-[150px]">
+              <SelectTrigger className="h-10 w-full lg:w-[150px]" aria-label="筛选账号类型">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -641,7 +736,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                 setPage(1);
               }}
             >
-              <SelectTrigger className="h-10 w-full lg:w-[150px]">
+              <SelectTrigger className="h-10 w-full lg:w-[150px]" aria-label="筛选账号状态">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -741,6 +836,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                       <Checkbox
                         checked={allCurrentSelected}
                         onCheckedChange={(checked) => toggleSelectAll(Boolean(checked))}
+                        aria-label={allCurrentSelected ? "取消选择当前页账号" : "选择当前页全部账号"}
                       />
                     </TableHead>
                     <TableHead className="w-56">token</TableHead>
@@ -749,6 +845,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                     <TableHead className="w-56">账号信息</TableHead>
                     <TableHead className="w-24">额度</TableHead>
                     <TableHead className="w-40">恢复时间</TableHead>
+                    <TableHead className="w-52">心跳 / 存活</TableHead>
                     <TableHead className="w-18">成功</TableHead>
                     <TableHead className="w-18">失败</TableHead>
                     <TableHead className="w-24">操作</TableHead>
@@ -764,6 +861,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                         <TableCell>
                           <Checkbox
                             checked={selectedIds.includes(account.id)}
+                            aria-label="选择账号"
                             onCheckedChange={(checked) => {
                               setSelectedIds((prev) =>
                                 checked
@@ -786,6 +884,8 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                                   void navigator.clipboard.writeText(account.access_token || "");
                                   toast.success("token 已复制");
                                 }}
+                                aria-label="复制账号 Token"
+                                title="复制 Token"
                               >
                                 <Copy className="size-4" />
                               </button>
@@ -825,6 +925,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                             );
                           })()}
                         </TableCell>
+                        <TableCell>{renderHeartbeatInfo(account)}</TableCell>
                         <TableCell>{account.success}</TableCell>
                         <TableCell>{account.fail}</TableCell>
                         <TableCell>
@@ -835,6 +936,8 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                                 className="rounded-md p-2 transition hover:bg-muted hover:text-foreground"
                                 onClick={() => openEditDialog(account)}
                                 disabled={isUpdating}
+                                aria-label="编辑账号"
+                                title="编辑账号"
                               >
                                 <Pencil className="size-4" />
                               </button>
@@ -845,6 +948,8 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                                 className="rounded-md p-2 transition hover:bg-muted hover:text-foreground"
                                 onClick={() => void handleRefreshAccounts([account.id])}
                                 disabled={isRefreshing}
+                                aria-label="刷新账号状态"
+                                title="刷新账号"
                               >
                                 <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
                               </button>
@@ -855,6 +960,8 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                                 className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
                                 onClick={() => void handleDeleteAccounts([account.id])}
                                 disabled={isDeleting}
+                                aria-label="删除账号"
+                                title="删除账号"
                               >
                                 <Trash2 className="size-4" />
                               </button>
@@ -898,7 +1005,7 @@ function AccountsPageContent({ session }: { session: StoredAuthSession }) {
                     setPage(1);
                   }}
                 >
-                  <SelectTrigger className="h-10 w-[108px] shrink-0 rounded-lg border-stone-200 bg-white text-sm leading-none">
+                  <SelectTrigger className="h-10 w-[108px] shrink-0 rounded-lg border-stone-200 bg-white text-sm leading-none" aria-label="选择每页账号数量">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>

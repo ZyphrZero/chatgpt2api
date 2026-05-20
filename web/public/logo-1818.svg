@@ -1,0 +1,15 @@
+<svg width="184" height="52" viewBox="0 0 184 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="4.5" y="7.5" width="168" height="37" rx="18.5" fill="white" stroke="#0B0D12" stroke-width="2.4"/>
+  <path d="M21 26C21 17.1634 28.1634 10 37 10H154C162.837 10 170 17.1634 170 26C170 34.8366 162.837 42 154 42H37C28.1634 42 21 34.8366 21 26Z" fill="url(#softGlow)" fill-opacity=".55"/>
+  <text x="40" y="33.4" fill="#080A0F" font-family="Avenir Next, Montserrat, Arial Black, sans-serif" font-size="24" font-weight="900" font-style="italic" letter-spacing="-.8">1818</text>
+  <text x="104" y="33.1" fill="#080A0F" font-family="Avenir Next, Montserrat, Arial Black, sans-serif" font-size="15" font-weight="900" letter-spacing="-.55">.PRO</text>
+  <circle cx="174" cy="26" r="5.5" fill="#3B5BFF"/>
+  <circle cx="174" cy="26" r="8.5" fill="#3B5BFF" fill-opacity=".12"/>
+  <defs>
+    <linearGradient id="softGlow" x1="21" y1="10" x2="158" y2="52" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset=".62" stop-color="#F8FBFF"/>
+      <stop offset="1" stop-color="#EDF4FF"/>
+    </linearGradient>
+  </defs>
+</svg>

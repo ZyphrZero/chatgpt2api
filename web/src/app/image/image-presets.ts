@@ -8,6 +8,37 @@ export type ImagePromptPreset = {
   size: string;
 };
 
+export function publicImageOriginalPrompt(item: { prompt?: string }) {
+  return (item.prompt || "").trim();
+}
+
+export function imagePromptPresetFromPublicImage(item: {
+  path: string;
+  name: string;
+  url: string;
+  thumbnail_url?: string;
+  prompt?: string;
+  revised_prompt?: string;
+  aspect_ratio?: string;
+  requested_size?: string;
+  resolution?: string;
+  resolution_preset?: string;
+  owner_name?: string;
+}): ImagePromptPreset {
+  const prompt = publicImageOriginalPrompt(item);
+  return {
+    id: `public-gallery:${item.path}`,
+    title: prompt ? prompt.slice(0, 18) : item.name.replace(/\.[^.]+$/, "") || "公开图库模板",
+    prompt,
+    hint: [item.owner_name ? `来自 ${item.owner_name}` : "公开图库", item.resolution_preset || item.aspect_ratio || item.resolution]
+      .filter(Boolean)
+      .join(" / "),
+    imageSrc: item.thumbnail_url || item.url,
+    count: 1,
+    size: item.aspect_ratio || item.requested_size || item.resolution || "Auto",
+  };
+}
+
 export const IMAGE_PROMPT_PRESETS: ImagePromptPreset[] = [
   {
     id: "stellar-poster",

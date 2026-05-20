@@ -13,6 +13,10 @@ var dist embed.FS
 
 var staticFS = mustSubFS(dist, "dist")
 
+func IndexHTML() ([]byte, error) {
+	return fs.ReadFile(staticFS, "index.html")
+}
+
 func Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		clean := strings.Trim(strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/"), "/")

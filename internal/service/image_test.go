@@ -477,6 +477,7 @@ func TestImageServiceListImagesReturnsRequestedResolutionPreset(t *testing.T) {
 	service.RecordGeneratedImages([]string{rel}, "linuxdo:123", "alice", ImageVisibilityPrivate, GeneratedImageMetadata{
 		ResolutionPreset: "2k",
 		RequestedSize:    "2048x2048",
+		Prompt:           "画一张商业海报",
 	})
 
 	list := service.ListImages("http://127.0.0.1:8000", "", "", allImages)
@@ -486,6 +487,9 @@ func TestImageServiceListImagesReturnsRequestedResolutionPreset(t *testing.T) {
 	}
 	if items[0]["resolution_preset"] != "2k" || items[0]["requested_size"] != "2048x2048" {
 		t.Fatalf("request metadata = %#v", items[0])
+	}
+	if items[0]["prompt"] != "画一张商业海报" {
+		t.Fatalf("prompt metadata = %#v", items[0])
 	}
 	if items[0]["resolution"] != "32x24" {
 		t.Fatalf("actual resolution = %#v, want 32x24", items[0]["resolution"])

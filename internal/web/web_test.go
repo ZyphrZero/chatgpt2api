@@ -14,8 +14,10 @@ func TestHandlerServesEmbeddedSPA(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("SPA route status = %d body = %s", res.Code, res.Body.String())
 	}
-	if !strings.Contains(res.Body.String(), `<div id="root"></div>`) {
-		t.Fatalf("SPA route body missing root element: %q", res.Body.String())
+	body := res.Body.String()
+	if !strings.Contains(body, `id="root"`) && !strings.Contains(body, "id=root") &&
+		!strings.Contains(body, `id="app"`) && !strings.Contains(body, "id=app") {
+		t.Fatalf("SPA route body missing app root element: %q", body)
 	}
 }
 

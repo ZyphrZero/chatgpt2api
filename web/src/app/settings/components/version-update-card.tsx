@@ -340,7 +340,7 @@ export function VersionUpdateCard({
               <a
                 href={updateInfo.release_info.html_url}
                 target="_blank"
-                rel="noreferrer"
+                rel="noopener noreferrer"
               >
                 <CheckCircle2 data-icon="inline-start" />
                 Release

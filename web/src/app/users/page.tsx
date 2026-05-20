@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   KeyRound,
   LoaderCircle,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -40,6 +41,7 @@ import {
   type CreateManagedUserPayload,
   type ManagedUser,
   type ManagedRole,
+  type UpdateManagedUserPayload,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
@@ -78,6 +80,15 @@ type CreateUserForm = {
 };
 
 type CreateUserErrors = Partial<Record<"username" | "password" | "confirmPassword", string>>;
+
+type EditUserForm = {
+  name: string;
+  password: string;
+  quotaTotal: string;
+  quotaDelta: string;
+};
+
+type EditUserErrors = Partial<Record<"password" | "quotaTotal" | "quotaDelta", string>>;
 
 const accountUsernamePattern = /^[a-z0-9][a-z0-9_.-]{2,31}$/;
 
@@ -123,6 +134,51 @@ function createUserPayload(values: CreateUserForm): CreateManagedUserPayload {
   };
 }
 
+function createEditUserForm(user: ManagedUser): EditUserForm {
+  return {
+    name: user.name || "",
+    password: "",
+    quotaTotal: user.image_quota_total === null || user.image_quota_total === undefined ? "" : String(user.image_quota_total),
+    quotaDelta: "",
+  };
+}
+
+function validateQuotaInput(value: string, allowNegative = false) {
+  const text = value.trim();
+  if (text === "") {
+    return "";
+  }
+  if (!/^-?\d+$/.test(text)) {
+    return "请输入整数";
+  }
+  const number = Number.parseInt(text, 10);
+  if (!Number.isSafeInteger(number)) {
+    return "数值过大";
+  }
+  if (!allowNegative && number < 0) {
+    return "不能小于 0";
+  }
+  return "";
+}
+
+function validateEditUserForm(values: EditUserForm) {
+  const errors: EditUserErrors = {};
+  if (values.password && values.password.length < 8) {
+    errors.password = "密码长度不能少于 8 位";
+  } else if (values.password.length > 128) {
+    errors.password = "密码长度不能超过 128 位";
+  }
+  const quotaTotalError = validateQuotaInput(values.quotaTotal);
+  if (quotaTotalError) {
+    errors.quotaTotal = quotaTotalError;
+  }
+  const quotaDeltaError = validateQuotaInput(values.quotaDelta, true);
+  if (quotaDeltaError) {
+    errors.quotaDelta = quotaDeltaError;
+  }
+  return errors;
+}
+
 function providerLabel(provider?: string) {
   if (provider === "linuxdo") {
     return "Linuxdo";
@@ -164,6 +220,10 @@ type NormalizedUsagePoint = {
 
 function formatCompactNumber(value: unknown) {
   return compactNumberFormatter.format(numeric(value));
+}
+
+function formatQuotaLimit(value: unknown) {
+  return value === null || value === undefined ? "不限" : numeric(value);
 }
 
 function formatUsageDate(value?: string) {
@@ -329,16 +389,29 @@ function UsersContent() {
   const [roleUser, setRoleUser] = useState<ManagedUser | null>(null);
   const [selectedRoleId, setSelectedRoleId] = useState("");
   const [isSavingRole, setIsSavingRole] = useState(false);
+  const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
+  const [editForm, setEditForm] = useState<EditUserForm>({ name: "", password: "", quotaTotal: "", quotaDelta: "" });
+  const [editErrors, setEditErrors] = useState<EditUserErrors>({});
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
 
   const loadUsers = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [usersData, rolesData] = await Promise.all([
-        fetchManagedUsers(),
+      const [firstPage, rolesData] = await Promise.all([
+        fetchManagedUsers({ page: 1, page_size: 100 }),
         fetchManagedRoles(),
       ]);
       const nextRoles = normalizeManagedRoles(rolesData.items);
-      setItems(normalizeManagedUsers(usersData.items));
+      let aggregated = firstPage.items;
+      if (firstPage.total_pages > 1) {
+        const extraPages = await Promise.all(
+          Array.from({ length: firstPage.total_pages - 1 }, (_, index) =>
+            fetchManagedUsers({ page: index + 2, page_size: 100 }),
+          ),
+        );
+        aggregated = aggregated.concat(...extraPages.map((page) => page.items));
+      }
+      setItems(normalizeManagedUsers(aggregated));
       setRoles(nextRoles);
       setCreateForm((current) => ({
         ...current,
@@ -444,6 +517,63 @@ function UsersContent() {
   const openRoleDialog = (user: ManagedUser) => {
     setRoleUser(user);
     setSelectedRoleId(user.role_id || roles[0]?.id || "");
+  };
+
+  const openEditDialog = (user: ManagedUser) => {
+    setEditingUser(user);
+    setEditForm(createEditUserForm(user));
+    setEditErrors({});
+  };
+
+  const updateEditField = <Key extends keyof EditUserForm>(field: Key, value: EditUserForm[Key]) => {
+    setEditForm((current) => ({ ...current, [field]: value }));
+    setEditErrors((current) => ({ ...current, [field]: undefined }));
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editingUser) {
+      return;
+    }
+    const nextErrors = validateEditUserForm(editForm);
+    if (Object.keys(nextErrors).length > 0) {
+      setEditErrors(nextErrors);
+      return;
+    }
+
+    const updates: UpdateManagedUserPayload = {};
+    if (editForm.name.trim() !== (editingUser.name || "")) {
+      updates.name = editForm.name.trim();
+    }
+    if (editForm.password) {
+      updates.password = editForm.password;
+    }
+    const originalQuotaTotal = createEditUserForm(editingUser).quotaTotal;
+    if (editForm.quotaTotal.trim() !== "" && editForm.quotaTotal.trim() !== originalQuotaTotal) {
+      updates.image_quota_total = Number.parseInt(editForm.quotaTotal.trim(), 10);
+    }
+    if (editForm.quotaDelta.trim() !== "") {
+      updates.image_quota_delta = Number.parseInt(editForm.quotaDelta.trim(), 10);
+    }
+    if (Object.keys(updates).length === 0) {
+      toast.message("没有需要保存的改动");
+      return;
+    }
+
+    const user = editingUser;
+    setIsSavingEdit(true);
+    setItemPending(user.id, true);
+    try {
+      const data = await updateManagedUser(user.id, updates);
+      setItems(normalizeManagedUsers(data.items));
+      setEditingUser(null);
+      setEditErrors({});
+      toast.success("用户已更新");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存用户失败");
+    } finally {
+      setIsSavingEdit(false);
+      setItemPending(user.id, false);
+    }
   };
 
   const handleSaveRole = async () => {
@@ -568,7 +698,7 @@ function UsersContent() {
                   <TableHead>额度消耗</TableHead>
                   <TableHead className="w-[340px]">调用曲线</TableHead>
                   <TableHead>时间</TableHead>
-                  <TableHead className="w-[260px]">操作</TableHead>
+                  <TableHead className="w-[340px]">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -649,6 +779,16 @@ function UsersContent() {
                           >
                             <ShieldCheck className="size-4" />
                             角色
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            className="h-8 rounded-lg px-3"
+                            onClick={() => openEditDialog(user)}
+                            disabled={isPending}
+                          >
+                            <Pencil className="size-4" />
+                            编辑
                           </Button>
                           <Button
                             type="button"
@@ -792,6 +932,110 @@ function UsersContent() {
             <Button type="button" className="h-10 rounded-xl px-5" onClick={() => void handleCreate()} disabled={isCreating}>
               {isCreating ? <LoaderCircle className="size-4 animate-spin" /> : <Plus className="size-4" />}
               创建
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(editingUser)} onOpenChange={(open) => (!open ? setEditingUser(null) : null)}>
+        <DialogContent className="rounded-2xl p-6 sm:max-w-2xl">
+          <DialogHeader className="gap-2">
+            <DialogTitle className="flex items-center gap-2">
+              <Pencil className="size-5 text-[#1456f0]" />
+              编辑用户
+            </DialogTitle>
+            <DialogDescription className="truncate text-sm">
+              {editingUser?.username || editingUser?.name || "用户"} · {editingUser?.id}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700 dark:text-foreground">显示名称</label>
+              <Input
+                value={editForm.name}
+                onChange={(event) => updateEditField("name", event.target.value)}
+                placeholder="显示名称"
+                className="h-11 rounded-xl"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700 dark:text-foreground">重置密码</label>
+              <div className="relative">
+                <KeyRound className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={editForm.password}
+                  onChange={(event) => updateEditField("password", event.target.value)}
+                  placeholder="留空则不修改"
+                  type="password"
+                  autoComplete="new-password"
+                  className="h-11 rounded-xl pl-9"
+                  aria-invalid={Boolean(editErrors.password)}
+                />
+              </div>
+              {editErrors.password ? <p className="text-xs leading-5 text-destructive">{editErrors.password}</p> : null}
+            </div>
+          </div>
+          <div className="rounded-xl border border-border bg-muted/20 p-4 text-sm text-muted-foreground">
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div>
+                <div className="text-xs">当前总额度</div>
+                <div className="mt-1 text-lg font-semibold text-foreground">{formatQuotaLimit(editingUser?.image_quota_total)}</div>
+              </div>
+              <div>
+                <div className="text-xs">已用</div>
+                <div className="mt-1 text-lg font-semibold text-foreground">{numeric(editingUser?.image_quota_used)}</div>
+              </div>
+              <div>
+                <div className="text-xs">剩余</div>
+                <div className="mt-1 text-lg font-semibold text-foreground">{formatQuotaLimit(editingUser?.image_quota_remaining)}</div>
+              </div>
+            </div>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700 dark:text-foreground">设置总点数</label>
+              <Input
+                value={editForm.quotaTotal}
+                onChange={(event) => updateEditField("quotaTotal", event.target.value)}
+                placeholder="留空不改；例如 100"
+                inputMode="numeric"
+                className="h-11 rounded-xl"
+                aria-invalid={Boolean(editErrors.quotaTotal)}
+              />
+              {editErrors.quotaTotal ? <p className="text-xs leading-5 text-destructive">{editErrors.quotaTotal}</p> : null}
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700 dark:text-foreground">增减点数</label>
+              <Input
+                value={editForm.quotaDelta}
+                onChange={(event) => updateEditField("quotaDelta", event.target.value)}
+                placeholder="加 10 填 10，扣 5 填 -5"
+                inputMode="numeric"
+                className="h-11 rounded-xl"
+                aria-invalid={Boolean(editErrors.quotaDelta)}
+              />
+              {editErrors.quotaDelta ? <p className="text-xs leading-5 text-destructive">{editErrors.quotaDelta}</p> : null}
+            </div>
+          </div>
+          <p className="text-xs leading-5 text-muted-foreground">修改密码会让该用户现有本地登录会话失效，需使用新密码重新登录。</p>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="secondary"
+              className="h-10 rounded-xl px-5"
+              onClick={() => setEditingUser(null)}
+              disabled={isSavingEdit}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              className="h-10 rounded-xl px-5"
+              onClick={() => void handleSaveEdit()}
+              disabled={isSavingEdit || !editingUser}
+            >
+              {isSavingEdit ? <LoaderCircle className="size-4 animate-spin" /> : <Pencil className="size-4" />}
+              保存
             </Button>
           </DialogFooter>
         </DialogContent>

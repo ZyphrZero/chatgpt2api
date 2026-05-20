@@ -1,12 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { History, ImagePlus, LoaderCircle, Plus, Trash2, X } from "lucide-react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { History, LoaderCircle, Plus, Trash2 } from "lucide-react";
+import { useLocation } from "react-router-dom";
 import { toast } from "sonner";
 
 import { ImageComposer } from "@/app/image/components/image-composer";
-import { ImagePromptMarket } from "@/app/image/components/image-prompt-market";
-import { ImageResults, type ImageLightboxItem } from "@/app/image/components/image-results";
+import type { ImageLightboxItem } from "@/app/image/components/image-results";
 import type { BananaPrompt } from "@/app/image/banana-prompts";
 import {
   CUSTOM_IMAGE_ASPECT_RATIO,
@@ -29,9 +29,11 @@ import {
   type ImageSizeMode,
   type ImageSizeSelection,
 } from "@/app/image/image-options";
-import { IMAGE_PROMPT_PRESETS, type ImagePromptPreset } from "@/app/image/image-presets";
-import { ImageSidebar } from "@/app/image/components/image-sidebar";
-import { ImageLightbox } from "@/components/image-lightbox";
+import {
+  imagePromptPresetFromPublicImage,
+  publicImageOriginalPrompt,
+  type ImagePromptPreset,
+} from "@/app/image/image-presets";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -41,16 +43,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
 import {
   cancelCreationTask,
   CHAT_MODEL_OPTIONS,
@@ -61,6 +53,7 @@ import {
   DEFAULT_CHAT_MODEL,
   DEFAULT_IMAGE_MODEL,
   fetchCreationTasks,
+  fetchManagedImages,
   IMAGE_CREATION_MODEL_OPTIONS,
   IMAGE_OUTPUT_FORMAT_OPTIONS,
   isChatModel,
@@ -78,6 +71,7 @@ import {
   type CreationTask,
   type CreationTaskMessage,
   type ImageVisibility,
+  type ManagedImage,
 } from "@/lib/api";
 import { clearImageManagerCache } from "@/lib/image-manager-cache";
 import { getManagedImagePathFromUrl } from "@/lib/image-path";
@@ -110,6 +104,22 @@ import {
   type ImageTurnProgress,
 } from "@/store/image-turn-progress";
 
+const ImagePromptMarket = lazy(() =>
+  import("@/app/image/components/image-prompt-market").then((module) => ({ default: module.ImagePromptMarket })),
+);
+const ImageResults = lazy(() =>
+  import("@/app/image/components/image-results").then((module) => ({ default: module.ImageResults })),
+);
+const ImageSidebar = lazy(() =>
+  import("@/app/image/components/image-sidebar").then((module) => ({ default: module.ImageSidebar })),
+);
+const ImageTurnEditDialog = lazy(() =>
+  import("@/app/image/components/image-turn-edit-dialog").then((module) => ({ default: module.ImageTurnEditDialog })),
+);
+const ImageLightbox = lazy(() =>
+  import("@/components/image-lightbox").then((module) => ({ default: module.ImageLightbox })),
+);
+
 const COMPOSER_MODE_STORAGE_KEY = "chatgpt2api:image_composer_mode";
 const IMAGE_MODEL_STORAGE_KEY = "chatgpt2api:image_last_model";
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
@@ -122,12 +132,17 @@ const IMAGE_CUSTOM_HEIGHT_STORAGE_KEY = "chatgpt2api:image_last_custom_height";
 const IMAGE_QUALITY_STORAGE_KEY = "chatgpt2api:image_last_quality";
 const IMAGE_OUTPUT_FORMAT_STORAGE_KEY = "chatgpt2api:image_last_output_format";
 const IMAGE_OUTPUT_COMPRESSION_STORAGE_KEY = "chatgpt2api:image_last_output_compression";
+const IMAGE_SPEED_DEFAULTS_VERSION_STORAGE_KEY = "chatgpt2api:image_speed_defaults_version";
+const IMAGE_SPEED_DEFAULTS_VERSION = "20260513-medium-webp";
 const QUOTA_REFRESH_EVENT = "chatgpt2api:quota-refresh";
-const DEFAULT_IMAGE_QUALITY: ImageQuality = "high";
-const DEFAULT_IMAGE_OUTPUT_FORMAT: ImageOutputFormat = "png";
+const DEFAULT_IMAGE_QUALITY: ImageQuality = "medium";
+const DEFAULT_IMAGE_OUTPUT_FORMAT: ImageOutputFormat = "webp";
 const activeConversationQueueIds = new Set<string>();
 const EMPTY_IMAGE_ASPECT_RATIO_SELECT_VALUE = "__empty_aspect_ratio__";
 const MISSING_RECOVERABLE_TASK_ID_ERROR = "页面刷新或任务中断，未找到可恢复的任务 ID";
+const MISSING_CREATION_TASK_ERROR = "页面刷新或服务重启后任务状态已丢失，请重新生成";
+const CREATION_TASK_POLL_INTERVAL_MS = 500;
+const CREATION_TASK_POLL_RETRY_LIMIT = 12;
 
 type ComposerMode = "chat" | "image";
 
@@ -256,6 +271,118 @@ function getPromptReferenceImageUrls(prompt: BananaPrompt) {
   return Array.from(new Set(urls.map((url) => url.trim()).filter(Boolean)));
 }
 
+function buildPublicGalleryPresets(items: ManagedImage[]) {
+  return items
+    .filter((item) => item.visibility === "public" && publicImageOriginalPrompt(item))
+    .slice(0, 8)
+    .map(imagePromptPresetFromPublicImage);
+}
+
+function isCompactImageViewport() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  return window.matchMedia?.("(max-width: 768px), (pointer: coarse)").matches ?? false;
+}
+
+function shouldLoadPublicPresetsOnStartup() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  return !isCompactImageViewport();
+}
+
+function imageProgressTickIntervalMs() {
+  return isCompactImageViewport() ? 2500 : 1000;
+}
+
+function imageTaskPollingIntervalMs() {
+  return isCompactImageViewport() ? 3500 : 2000;
+}
+
+function shouldRenderDesktopSidebar() {
+  if (typeof window === "undefined") {
+    return true;
+  }
+  return window.matchMedia?.("(min-width: 1024px)").matches ?? true;
+}
+
+function scheduleIdleStartupWork(callback: () => void) {
+  if (typeof window === "undefined") {
+    return () => undefined;
+  }
+  if ("requestIdleCallback" in window) {
+    const idleId = window.requestIdleCallback(callback, { timeout: 1800 });
+    return () => window.cancelIdleCallback(idleId);
+  }
+  const timer = globalThis.setTimeout(callback, 900);
+  return () => globalThis.clearTimeout(timer);
+}
+
+function scheduleInitialHistoryLoad(callback: () => void) {
+  if (typeof window === "undefined") {
+    return () => undefined;
+  }
+  let cancelled = false;
+  let idleId: number | null = null;
+  let timer: ReturnType<typeof globalThis.setTimeout> | null = null;
+  const frameId = window.requestAnimationFrame(() => {
+    if (cancelled) {
+      return;
+    }
+    if ("requestIdleCallback" in window) {
+      idleId = window.requestIdleCallback(callback, { timeout: 500 });
+      return;
+    }
+    timer = globalThis.setTimeout(callback, 120);
+  });
+  return () => {
+    cancelled = true;
+    window.cancelAnimationFrame(frameId);
+    if (idleId !== null) {
+      window.cancelIdleCallback(idleId);
+    }
+    if (timer !== null) {
+      globalThis.clearTimeout(timer);
+    }
+  };
+}
+
+function scheduleImagePreferencePersist(callback: () => void) {
+  if (typeof window === "undefined") {
+    return () => undefined;
+  }
+  if ("requestIdleCallback" in window) {
+    const idleId = window.requestIdleCallback(callback, { timeout: 700 });
+    return () => window.cancelIdleCallback(idleId);
+  }
+  const timer = globalThis.setTimeout(callback, 250);
+  return () => globalThis.clearTimeout(timer);
+}
+
+function ImageSidebarFallback({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className={cn("h-full min-h-0 rounded-[18px] bg-white/45 p-2 dark:bg-[#15120d]/60", compact ? "min-h-[240px]" : "")}>
+      <div className="mb-2 h-9 rounded-[16px] bg-black/[0.05] dark:bg-white/10" />
+      <div className="space-y-2">
+        {Array.from({ length: compact ? 4 : 6 }).map((_, index) => (
+          <div key={index} className="h-14 rounded-[15px] bg-black/[0.035] dark:bg-white/[0.075]" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LazyDialogFallback({ label }: { label: string }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4 backdrop-blur-[2px]">
+      <div className="w-[min(92vw,420px)] rounded-[28px] border border-white/75 bg-white/92 p-5 text-center text-sm font-semibold text-[#45515e] shadow-[0_28px_80px_-36px_rgba(15,23,42,0.55)] dark:border-[#d6aa56]/24 dark:bg-[#0e0d0a]/92 dark:text-[#d6aa56]">
+        {label}
+      </div>
+    </div>
+  );
+}
+
 async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: string) {
   const direct = buildReferenceImageFromResult(image, fileName);
   if (direct) {
@@ -320,6 +447,10 @@ function imageTaskIdForImage(turnId: string, images: StoredImage[], imageIndex: 
   return images[imageIndex]?.taskId || imageTaskBatchId(turnId, imageIndex);
 }
 
+function recoverableImageTaskId(turnId: string, imageIndex: number) {
+  return imageTaskBatchId(`${turnId}-${createId()}`, imageIndex);
+}
+
 function imageDataIndexForTask(images: StoredImage[], imageIndex: number) {
   const taskId = images[imageIndex]?.taskId || images[imageIndex]?.id;
   if (!taskId) {
@@ -348,6 +479,23 @@ const STORED_IMAGE_FIELDS: Array<keyof StoredImage> = [
 function updateStoredImage(image: StoredImage, updates: Partial<StoredImage>): StoredImage {
   const next = { ...image, ...updates };
   return STORED_IMAGE_FIELDS.every((field) => image[field] === next[field]) ? image : next;
+}
+
+function recoverStoredImageForResubmit(image: StoredImage, turn: ImageTurn, imageIndex: number): StoredImage {
+  return updateStoredImage(image, {
+    taskId: image.taskId || recoverableImageTaskId(turn.id, imageIndex),
+    status: "loading",
+    b64_json: undefined,
+    url: undefined,
+    path: undefined,
+    width: undefined,
+    height: undefined,
+    resolution: undefined,
+    visibility: turn.mode === "chat" ? undefined : image.visibility || turn.visibility || "private",
+    revised_prompt: undefined,
+    text_response: undefined,
+    error: undefined,
+  });
 }
 
 function taskDataToStoredImage(image: StoredImage, task: CreationTask, dataIndex = 0, fallbackVisibility?: ImageVisibility): StoredImage {
@@ -480,11 +628,14 @@ function getStoredComposerMode(): ComposerMode {
 }
 
 function getStoredImageQuality(): ImageQuality {
-  if (typeof window === "undefined") {
-    return DEFAULT_IMAGE_QUALITY;
-  }
-  const storedQuality = window.localStorage.getItem(IMAGE_QUALITY_STORAGE_KEY);
-  return isImageQuality(storedQuality) ? storedQuality : DEFAULT_IMAGE_QUALITY;
+	if (typeof window === "undefined") {
+		return DEFAULT_IMAGE_QUALITY;
+	}
+	if (window.localStorage.getItem(IMAGE_SPEED_DEFAULTS_VERSION_STORAGE_KEY) !== IMAGE_SPEED_DEFAULTS_VERSION) {
+		return DEFAULT_IMAGE_QUALITY;
+	}
+	const storedQuality = window.localStorage.getItem(IMAGE_QUALITY_STORAGE_KEY);
+	return isImageQuality(storedQuality) ? storedQuality : DEFAULT_IMAGE_QUALITY;
 }
 
 function getStoredImageSizeSelection(): ImageSizeSelection {
@@ -512,11 +663,14 @@ function getStoredImageSizeSelection(): ImageSizeSelection {
 }
 
 function getStoredImageOutputFormat(): ImageOutputFormat {
-  if (typeof window === "undefined") {
-    return DEFAULT_IMAGE_OUTPUT_FORMAT;
-  }
-  const storedFormat = window.localStorage.getItem(IMAGE_OUTPUT_FORMAT_STORAGE_KEY);
-  return isImageOutputFormat(storedFormat) ? storedFormat : DEFAULT_IMAGE_OUTPUT_FORMAT;
+	if (typeof window === "undefined") {
+		return DEFAULT_IMAGE_OUTPUT_FORMAT;
+	}
+	if (window.localStorage.getItem(IMAGE_SPEED_DEFAULTS_VERSION_STORAGE_KEY) !== IMAGE_SPEED_DEFAULTS_VERSION) {
+		return DEFAULT_IMAGE_OUTPUT_FORMAT;
+	}
+	const storedFormat = window.localStorage.getItem(IMAGE_OUTPUT_FORMAT_STORAGE_KEY);
+	return isImageOutputFormat(storedFormat) ? storedFormat : DEFAULT_IMAGE_OUTPUT_FORMAT;
 }
 
 function getStoredImageOutputCompression(): string {
@@ -525,6 +679,16 @@ function getStoredImageOutputCompression(): string {
   }
   const normalized = normalizeOutputCompressionValue(window.localStorage.getItem(IMAGE_OUTPUT_COMPRESSION_STORAGE_KEY));
   return normalized === undefined ? "" : String(normalized);
+}
+
+function getStoredImagePreferences() {
+  return {
+    model: getStoredImageModel(),
+    sizeSelection: getStoredImageSizeSelection(),
+    quality: getStoredImageQuality(),
+    outputFormat: getStoredImageOutputFormat(),
+    outputCompression: getStoredImageOutputCompression(),
+  };
 }
 
 function serializeImageSizeSelection(selection: ImageSizeSelection): StoredImageSizeSelection {
@@ -587,6 +751,16 @@ function formatCreationTaskErrorMessage(message: string) {
   if (normalized.includes("timed out waiting for async image generation")) {
     return "图片生成等待超时，建议稍后重试，或降低分辨率、质量后再试。";
   }
+  if (normalized.includes("图片生成超过等待上限")) {
+    return "上游生成耗时超过等待上限，请稍后重试或切换账号。";
+  }
+  if (
+    normalized.includes("upstream returned cloudflare origin error page") ||
+    normalized.includes("upstream returned cloudflare challenge page") ||
+    (normalized.includes("cloudflare") && trimmed.includes("源服务器"))
+  ) {
+    return "上游 Cloudflare 临时异常，系统会自动冷却当前账号并换号重试。若仍失败，请稍后再试或切换代理/账号。";
+  }
   if (normalized.includes("no available image quota")) {
     return "当前没有可用的图片额度，请检查账号额度或稍后重试。";
   }
@@ -646,6 +820,10 @@ function isMissingRecoverableTaskIdError(error?: string) {
   return error === MISSING_RECOVERABLE_TASK_ID_ERROR;
 }
 
+function isRecoverableCreationTaskError(error?: string) {
+  return isMissingBatchImageDataError(error) || error === MISSING_CREATION_TASK_ERROR || isMissingRecoverableTaskIdError(error);
+}
+
 function getComposerConversationMode(composerMode: ComposerMode, referenceImages: StoredReferenceImage[]): ImageConversationMode {
   if (composerMode === "chat") {
     return "chat";
@@ -665,7 +843,14 @@ function buildCreationTaskMessages(conversation: ImageConversation, activeTurnId
   for (const turn of conversation.turns) {
     const prompt = turn.prompt.trim();
     if (prompt) {
-      messages.push({ role: "user", content: prompt });
+      const content: CreationTaskMessage["content"] =
+        turn.mode === "chat" && turn.referenceImages.length > 0
+          ? [
+              { type: "text", text: prompt },
+              ...turn.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } })),
+            ]
+          : prompt;
+      messages.push({ role: "user", content });
     }
     if (turn.id === activeTurnId) {
       break;
@@ -687,7 +872,7 @@ function buildCreationTaskMessages(conversation: ImageConversation, activeTurnId
   return messages;
 }
 
-async function syncConversationCreationTasks(items: ImageConversation[]) {
+async function syncConversationCreationTasks(items: ImageConversation[], options: { persist?: boolean } = {}) {
   const taskIds = Array.from(
     new Set(
       items.flatMap((conversation) =>
@@ -708,6 +893,7 @@ async function syncConversationCreationTasks(items: ImageConversation[]) {
     return items;
   }
   const taskMap = new Map(taskList.items.map((task) => [task.id, task]));
+  const missingTaskIds = new Set(taskList.missing_ids);
   let changed = false;
   const normalized = items.map((conversation) => {
     let completedActiveTurn = false;
@@ -715,6 +901,9 @@ async function syncConversationCreationTasks(items: ImageConversation[]) {
       let turnChanged = false;
       const images = turn.images.map((image, imageIndex) => {
         if (image.status !== "loading" || !image.taskId) {
+          return image;
+        }
+        if (missingTaskIds.has(image.taskId)) {
           return image;
         }
         const task = taskMap.get(image.taskId);
@@ -757,7 +946,10 @@ async function syncConversationCreationTasks(items: ImageConversation[]) {
       : nextConversation;
   });
 
-  if (changed) {
+  if (!changed) {
+    return items;
+  }
+  if (options.persist !== false) {
     await saveImageConversations(normalized);
   }
   return normalized;
@@ -769,29 +961,15 @@ async function recoverConversationHistory(items: ImageConversation[]) {
     const turns = conversation.turns.map((turn) => {
       let turnChanged = false;
       const recoveredImages = turn.images.map((image, imageIndex) => {
-        if (image.status === "error" && isMissingBatchImageDataError(image.error)) {
+        if (image.status === "error" && isRecoverableCreationTaskError(image.error)) {
           turnChanged = true;
-          return {
-            ...image,
-            taskId: image.id,
-            status: "loading" as const,
-            error: undefined,
-          };
+          return recoverStoredImageForResubmit(image, turn, imageIndex);
         }
-        if (turn.mode === "chat" && image.status === "error" && isMissingRecoverableTaskIdError(image.error)) {
+        if (image.status === "loading" && !image.taskId) {
           turnChanged = true;
           return {
             ...image,
-            taskId: imageTaskIdForImage(turn.id, turn.images, imageIndex),
-            status: "loading" as const,
-            error: undefined,
-          };
-        }
-        if (turn.mode === "chat" && image.status === "loading" && !image.taskId) {
-          turnChanged = true;
-          return {
-            ...image,
-            taskId: imageTaskIdForImage(turn.id, turn.images, imageIndex),
+            taskId: recoverableImageTaskId(turn.id, imageIndex),
           };
         }
         return image;
@@ -810,15 +988,15 @@ async function recoverConversationHistory(items: ImageConversation[]) {
         };
       }
 
-      const images = recoveredImages.map((image) => {
+      const images = recoveredImages.map((image, imageIndex) => {
         if (image.status !== "loading" || image.taskId) {
           return image;
         }
         turnChanged = true;
         return {
           ...image,
-          status: "error" as const,
-          error: MISSING_RECOVERABLE_TASK_ID_ERROR,
+          taskId: recoverableImageTaskId(turn.id, imageIndex),
+          error: undefined,
         };
       });
       const derived = deriveTurnStatus({ ...turn, images });
@@ -852,8 +1030,10 @@ async function recoverConversationHistory(items: ImageConversation[]) {
 }
 
 
-function ImagePageContent() {
+function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
+  const location = useLocation();
   const isSubmitDispatchingRef = useRef(false);
+  const foregroundPollingCountRef = useRef(0);
   const retryingImageIdsRef = useRef(new Set<string>());
   const cancelledTurnIdsRef = useRef(new Set<string>());
   const conversationsRef = useRef<ImageConversation[]>([]);
@@ -863,20 +1043,23 @@ function ImagePageContent() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editFileInputRef = useRef<HTMLInputElement>(null);
   const promptApplyRequestIdRef = useRef(0);
+  const appliedURLPromptRef = useRef("");
 
   const [imagePrompt, setImagePrompt] = useState("");
   const [composerMode, setComposerMode] = useState<ComposerMode>(getStoredComposerMode);
-  const [imageModel, setImageModel] = useState<ImageModel>(getStoredImageModel);
+  const [initialImagePreferences] = useState(getStoredImagePreferences);
+  const [imageModel, setImageModel] = useState<ImageModel>(() => initialImagePreferences.model);
   const [imageCount, setImageCount] = useState("1");
-  const [imageSizeMode, setImageSizeMode] = useState<ImageSizeMode>(() => getStoredImageSizeSelection().mode);
-  const [imageAspectRatio, setImageAspectRatio] = useState<ImageAspectRatio>(() => getStoredImageSizeSelection().aspectRatio);
-  const [imageResolution, setImageResolution] = useState<ImageResolution>(() => getStoredImageSizeSelection().resolution);
-  const [imageCustomRatio, setImageCustomRatio] = useState(() => getStoredImageSizeSelection().customRatio);
-  const [imageCustomWidth, setImageCustomWidth] = useState(() => getStoredImageSizeSelection().customWidth);
-  const [imageCustomHeight, setImageCustomHeight] = useState(() => getStoredImageSizeSelection().customHeight);
-  const [imageQuality, setImageQuality] = useState<ImageQuality>(getStoredImageQuality);
-  const [imageOutputFormat, setImageOutputFormat] = useState<ImageOutputFormat>(getStoredImageOutputFormat);
-  const [imageOutputCompression, setImageOutputCompression] = useState(getStoredImageOutputCompression);
+  const initialImageSizeSelection = initialImagePreferences.sizeSelection;
+  const [imageSizeMode, setImageSizeMode] = useState<ImageSizeMode>(() => initialImageSizeSelection.mode);
+  const [imageAspectRatio, setImageAspectRatio] = useState<ImageAspectRatio>(() => initialImageSizeSelection.aspectRatio);
+  const [imageResolution, setImageResolution] = useState<ImageResolution>(() => initialImageSizeSelection.resolution);
+  const [imageCustomRatio, setImageCustomRatio] = useState(() => initialImageSizeSelection.customRatio);
+  const [imageCustomWidth, setImageCustomWidth] = useState(() => initialImageSizeSelection.customWidth);
+  const [imageCustomHeight, setImageCustomHeight] = useState(() => initialImageSizeSelection.customHeight);
+  const [imageQuality, setImageQuality] = useState<ImageQuality>(() => initialImagePreferences.quality);
+  const [imageOutputFormat, setImageOutputFormat] = useState<ImageOutputFormat>(() => initialImagePreferences.outputFormat);
+  const [imageOutputCompression, setImageOutputCompression] = useState(() => initialImagePreferences.outputCompression);
   const [defaultImageVisibility, setDefaultImageVisibility] = useState<ImageVisibility>("private");
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isPromptMarketOpen, setIsPromptMarketOpen] = useState(false);
@@ -889,12 +1072,16 @@ function ImagePageContent() {
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: "one"; id: string } | { type: "all" } | null>(null);
   const [editingTurnDraft, setEditingTurnDraft] = useState<EditingTurnDraft | null>(null);
+  const [canRenderDesktopSidebar, setCanRenderDesktopSidebar] = useState(shouldRenderDesktopSidebar);
   const [progressByTurnKey, setProgressByTurnKey] = useState<Record<string, ImageTurnProgress>>(
     getImageTurnProgressSnapshot,
   );
   const [progressNow, setProgressNow] = useState(Date.now());
   const [composerDockHeight, setComposerDockHeight] = useState(0);
   const [visibilityMutatingImageKey, setVisibilityMutatingImageKey] = useState("");
+  const [publicPromptPresets, setPublicPromptPresets] = useState<ImagePromptPreset[]>([]);
+  const [publicPromptPresetStatus, setPublicPromptPresetStatus] = useState("");
+  const [isLoadingPublicPromptPresets, setIsLoadingPublicPromptPresets] = useState(false);
 
   const parsedCount = useMemo(() => normalizeRequestedImageCount(imageCount), [imageCount]);
   const imageSize = useMemo(
@@ -1006,8 +1193,80 @@ function ImagePageContent() {
   );
 
   useEffect(() => {
+    if (!shouldLoadPublicPresetsOnStartup() || isLoadingHistory || conversations.length === 0) {
+      if (!shouldLoadPublicPresetsOnStartup()) {
+        setPublicPromptPresetStatus("移动端优先保障输入流畅。需要灵感时，打开市场或图库复用公开作品。");
+      }
+      return;
+    }
+    const controller = new AbortController();
+    setIsLoadingPublicPromptPresets(true);
+    setPublicPromptPresetStatus("");
+    const cancelIdleWork = scheduleIdleStartupWork(() => {
+      void fetchManagedImages({ scope: "public" }, { signal: controller.signal })
+        .then((data) => {
+          const presets = buildPublicGalleryPresets(data.items);
+          setPublicPromptPresets(presets);
+          setPublicPromptPresetStatus(presets.length > 0 ? "" : "暂无可复用的公开图库预设。可以直接输入提示词开始。");
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) {
+            setPublicPromptPresets([]);
+            setPublicPromptPresetStatus("公开图库预设暂时读取失败。可以直接输入提示词，不影响生成。");
+          }
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setIsLoadingPublicPromptPresets(false);
+          }
+        });
+    });
+    return () => {
+      cancelIdleWork();
+      controller.abort();
+      setIsLoadingPublicPromptPresets(false);
+    };
+  }, [conversations.length, isLoadingHistory]);
+
+  useEffect(() => {
     conversationsRef.current = conversations;
   }, [conversations]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia?.("(min-width: 1024px)");
+    if (!mediaQuery) {
+      return;
+    }
+    const updateDesktopSidebarPreference = () => {
+      setCanRenderDesktopSidebar(mediaQuery.matches);
+    };
+    updateDesktopSidebarPreference();
+    mediaQuery.addEventListener?.("change", updateDesktopSidebarPreference);
+    return () => {
+      mediaQuery.removeEventListener?.("change", updateDesktopSidebarPreference);
+    };
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const promptFromURL = (params.get("prompt") || params.get("share_prompt") || "").trim();
+    const requestKey = `${location.pathname}${location.search}`;
+    if (!promptFromURL || appliedURLPromptRef.current === requestKey) {
+      return;
+    }
+    appliedURLPromptRef.current = requestKey;
+    promptApplyRequestIdRef.current += 1;
+    setSelectedConversationId(null);
+    setComposerMode("image");
+    setImagePrompt(promptFromURL);
+    setReferenceImages([]);
+    setDefaultImageVisibility("private");
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+    window.setTimeout(() => textareaRef.current?.focus(), 50);
+    toast.success("已填入分享提示词，可直接生成同款");
+  }, [location.pathname, location.search]);
 
   useEffect(() => {
     const node = composerDockRef.current;
@@ -1015,15 +1274,26 @@ function ImagePageContent() {
       return;
     }
 
-    const updateComposerHeight = () => {
+    let frameId = 0;
+    const measureComposerHeight = () => {
+      frameId = 0;
       const nextHeight = Math.ceil(node.getBoundingClientRect().height);
       setComposerDockHeight((currentHeight) => (currentHeight === nextHeight ? currentHeight : nextHeight));
     };
+    const scheduleComposerHeightMeasure = () => {
+      if (frameId !== 0) {
+        return;
+      }
+      frameId = window.requestAnimationFrame(measureComposerHeight);
+    };
 
-    updateComposerHeight();
-    const observer = new ResizeObserver(updateComposerHeight);
+    scheduleComposerHeightMeasure();
+    const observer = new ResizeObserver(scheduleComposerHeightMeasure);
     observer.observe(node);
     return () => {
+      if (frameId !== 0) {
+        window.cancelAnimationFrame(frameId);
+      }
       observer.disconnect();
     };
   }, []);
@@ -1033,7 +1303,7 @@ function ImagePageContent() {
 
     const refreshConversations = async () => {
       try {
-        const items = await listImageConversations();
+        const items = await syncConversationCreationTasks(await listImageConversations());
         if (cancelled) {
           return;
         }
@@ -1063,34 +1333,79 @@ function ImagePageContent() {
     [],
   );
 
+	  useEffect(() => {
+	    if (activeTaskCount === 0 && Object.keys(progressByTurnKey).length === 0) {
+	      return;
+	    }
+
+	    setProgressNow(Date.now());
+	    const tickIntervalMs = imageProgressTickIntervalMs();
+	    const timer = window.setInterval(() => {
+	      setProgressNow(Date.now());
+	    }, tickIntervalMs);
+	    return () => {
+	      window.clearInterval(timer);
+	    };
+	  }, [activeTaskCount, progressByTurnKey]);
+
   useEffect(() => {
-    if (activeTaskCount === 0 && Object.keys(progressByTurnKey).length === 0) {
+    if (activeTaskCount === 0) {
       return;
     }
 
-    setProgressNow(Date.now());
-    const timer = window.setInterval(() => {
-      setProgressNow(Date.now());
-    }, 1000);
+    let cancelled = false;
+    let syncing = false;
+    const syncActiveCreationTasks = async () => {
+      if (syncing || foregroundPollingCountRef.current > 0 || document.hidden) {
+        return;
+      }
+      syncing = true;
+      const snapshot = conversationsRef.current;
+      try {
+        const nextConversations = await syncConversationCreationTasks(snapshot, { persist: false });
+        if (!cancelled && conversationsRef.current === snapshot && nextConversations !== snapshot) {
+          conversationsRef.current = nextConversations;
+          setConversations(nextConversations);
+          await saveImageConversations(nextConversations);
+        }
+      } catch {
+        return;
+      } finally {
+        syncing = false;
+      }
+    };
+
+	    void syncActiveCreationTasks();
+	    const timer = window.setInterval(syncActiveCreationTasks, imageTaskPollingIntervalMs());
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        void syncActiveCreationTasks();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.clearInterval(timer);
     };
-  }, [activeTaskCount, progressByTurnKey]);
+  }, [activeTaskCount]);
 
   useEffect(() => {
     let cancelled = false;
 
     const loadHistory = async () => {
       try {
-        const storedSelection = getStoredImageSizeSelection();
-        setImageSizeMode(storedSelection.mode);
-        setImageAspectRatio(storedSelection.aspectRatio);
-        setImageResolution(storedSelection.resolution);
-        setImageCustomRatio(storedSelection.customRatio);
-        setImageCustomWidth(storedSelection.customWidth);
-        setImageCustomHeight(storedSelection.customHeight);
-        setImageOutputFormat(getStoredImageOutputFormat());
-        setImageOutputCompression(getStoredImageOutputCompression());
+        const storedPreferences = getStoredImagePreferences();
+        setImageModel(storedPreferences.model);
+        setImageSizeMode(storedPreferences.sizeSelection.mode);
+        setImageAspectRatio(storedPreferences.sizeSelection.aspectRatio);
+        setImageResolution(storedPreferences.sizeSelection.resolution);
+        setImageCustomRatio(storedPreferences.sizeSelection.customRatio);
+        setImageCustomWidth(storedPreferences.sizeSelection.customWidth);
+        setImageCustomHeight(storedPreferences.sizeSelection.customHeight);
+        setImageQuality(storedPreferences.quality);
+        setImageOutputFormat(storedPreferences.outputFormat);
+        setImageOutputCompression(storedPreferences.outputCompression);
 
         const items = await listImageConversations();
         const normalizedItems = await recoverConversationHistory(items);
@@ -1117,9 +1432,10 @@ function ImagePageContent() {
       }
     };
 
-    void loadHistory();
+    const cancelHistoryLoad = scheduleInitialHistoryLoad(loadHistory);
     return () => {
       cancelled = true;
+      cancelHistoryLoad();
     };
   }, []);
 
@@ -1165,19 +1481,54 @@ function ImagePageContent() {
       return;
     }
 
-    window.localStorage.setItem(COMPOSER_MODE_STORAGE_KEY, composerMode);
-  }, [composerMode]);
+    const cancelPreferencePersist = scheduleImagePreferencePersist(() => {
+      window.localStorage.setItem(COMPOSER_MODE_STORAGE_KEY, composerMode);
+      window.localStorage.setItem(IMAGE_MODEL_STORAGE_KEY, imageModel);
+      window.localStorage.setItem(IMAGE_SIZE_MODE_STORAGE_KEY, imageSizeMode);
+      if (imageAspectRatio) {
+        window.localStorage.setItem(IMAGE_ASPECT_RATIO_STORAGE_KEY, imageAspectRatio);
+      } else {
+        window.localStorage.removeItem(IMAGE_ASPECT_RATIO_STORAGE_KEY);
+      }
+      window.localStorage.setItem(IMAGE_RESOLUTION_STORAGE_KEY, imageResolution);
+      window.localStorage.setItem(IMAGE_CUSTOM_RATIO_STORAGE_KEY, imageCustomRatio);
+      window.localStorage.setItem(IMAGE_CUSTOM_WIDTH_STORAGE_KEY, imageCustomWidth);
+      window.localStorage.setItem(IMAGE_CUSTOM_HEIGHT_STORAGE_KEY, imageCustomHeight);
+      if (imageSize) {
+        window.localStorage.setItem(IMAGE_SIZE_STORAGE_KEY, imageSize);
+      } else {
+        window.localStorage.removeItem(IMAGE_SIZE_STORAGE_KEY);
+      }
+      window.localStorage.setItem(IMAGE_SPEED_DEFAULTS_VERSION_STORAGE_KEY, IMAGE_SPEED_DEFAULTS_VERSION);
+      window.localStorage.setItem(IMAGE_QUALITY_STORAGE_KEY, imageQuality);
+      window.localStorage.setItem(IMAGE_OUTPUT_FORMAT_STORAGE_KEY, imageOutputFormat);
+      const normalizedCompression = normalizeOutputCompressionValue(imageOutputCompression);
+      if (normalizedCompression === undefined || imageOutputFormat === "png") {
+        window.localStorage.removeItem(IMAGE_OUTPUT_COMPRESSION_STORAGE_KEY);
+      } else {
+        window.localStorage.setItem(IMAGE_OUTPUT_COMPRESSION_STORAGE_KEY, String(normalizedCompression));
+      }
+    });
+    return cancelPreferencePersist;
+  }, [
+    composerMode,
+    imageAspectRatio,
+    imageCustomHeight,
+    imageCustomRatio,
+    imageCustomWidth,
+    imageModel,
+    imageOutputCompression,
+    imageOutputFormat,
+    imageQuality,
+    imageResolution,
+    imageSize,
+    imageSizeMode,
+  ]);
 
   useEffect(() => {
     if (composerMode === "chat") {
       if (!isChatModel(imageModel)) {
         setImageModel(DEFAULT_CHAT_MODEL);
-      }
-      if (referenceImages.length > 0) {
-        setReferenceImages([]);
-        if (fileInputRef.current) {
-          fileInputRef.current.value = "";
-        }
       }
       return;
     }
@@ -1185,59 +1536,7 @@ function ImagePageContent() {
     if (!isImageCreationModel(imageModel)) {
       setImageModel(DEFAULT_IMAGE_MODEL);
     }
-  }, [composerMode, imageModel, referenceImages.length]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(IMAGE_MODEL_STORAGE_KEY, imageModel);
-  }, [imageModel]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(IMAGE_SIZE_MODE_STORAGE_KEY, imageSizeMode);
-    if (imageAspectRatio) {
-      window.localStorage.setItem(IMAGE_ASPECT_RATIO_STORAGE_KEY, imageAspectRatio);
-    } else {
-      window.localStorage.removeItem(IMAGE_ASPECT_RATIO_STORAGE_KEY);
-    }
-    window.localStorage.setItem(IMAGE_RESOLUTION_STORAGE_KEY, imageResolution);
-    window.localStorage.setItem(IMAGE_CUSTOM_RATIO_STORAGE_KEY, imageCustomRatio);
-    window.localStorage.setItem(IMAGE_CUSTOM_WIDTH_STORAGE_KEY, imageCustomWidth);
-    window.localStorage.setItem(IMAGE_CUSTOM_HEIGHT_STORAGE_KEY, imageCustomHeight);
-    if (imageSize) {
-      window.localStorage.setItem(IMAGE_SIZE_STORAGE_KEY, imageSize);
-      return;
-    }
-    window.localStorage.removeItem(IMAGE_SIZE_STORAGE_KEY);
-  }, [imageAspectRatio, imageCustomHeight, imageCustomRatio, imageCustomWidth, imageResolution, imageSize, imageSizeMode]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(IMAGE_QUALITY_STORAGE_KEY, imageQuality);
-  }, [imageQuality]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem(IMAGE_OUTPUT_FORMAT_STORAGE_KEY, imageOutputFormat);
-    const normalizedCompression = normalizeOutputCompressionValue(imageOutputCompression);
-    if (normalizedCompression === undefined || imageOutputFormat === "png") {
-      window.localStorage.removeItem(IMAGE_OUTPUT_COMPRESSION_STORAGE_KEY);
-      return;
-    }
-    window.localStorage.setItem(IMAGE_OUTPUT_COMPRESSION_STORAGE_KEY, String(normalizedCompression));
-  }, [imageOutputCompression, imageOutputFormat]);
+  }, [composerMode, imageModel]);
 
   useEffect(() => {
     if (selectedConversationId && !conversations.some((conversation) => conversation.id === selectedConversationId)) {
@@ -1490,7 +1789,6 @@ function ImagePageContent() {
         })),
       );
 
-      setComposerMode("image");
       setReferenceImages((prev) => [...prev, ...previews]);
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
@@ -1669,7 +1967,7 @@ function ImagePageContent() {
           ? ""
           : String(targetTurn.outputCompression),
       visibility: targetTurn.visibility || "private",
-      referenceImages: targetTurn.mode === "chat" ? [] : targetTurn.referenceImages,
+      referenceImages: targetTurn.referenceImages,
     });
   }, []);
 
@@ -1731,6 +2029,7 @@ function ImagePageContent() {
       }
 
       activeConversationQueueIds.add(conversationId);
+      foregroundPollingCountRef.current += 1;
       const activeTurnKey = imageTurnProgressKey(conversationId, activeTurn.id);
       updateTurnProgress(conversationId, activeTurn.id, {
         message: activeTurn.mode === "chat" ? "正在准备对话请求" : "正在准备生成任务",
@@ -1896,9 +2195,10 @@ function ImagePageContent() {
         await applyTasks(submitted);
         updateTurnProgress(conversationId, activeTurn.id, {
           message: activeTurn.mode === "chat" ? "等待对话回复" : "等待生成结果",
-          detail: "请求已提交，正在轮询任务状态",
+          detail: activeTurn.mode === "chat" ? "请求已提交，正在等待首包" : `已提交 ${pendingTaskGroups.length} 个任务，正在等待上游开始生成`,
         });
 
+        let consecutivePollFailures = 0;
         while (true) {
           const latestConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
           const latestTurn = latestConversation?.turns.find((turn) => turn.id === activeTurn.id);
@@ -1913,14 +2213,43 @@ function ImagePageContent() {
             break;
           }
 
-          updateTurnProgress(conversationId, activeTurn.id, {
-            message: activeTurn.mode === "chat" ? "等待对话回复" : "等待生成结果",
-            detail: activeTurn.mode === "chat" ? "对话任务处理中" : `还有 ${loadingTaskIds.length} 张图片处理中`,
-          });
-          await sleep(2000);
-          const taskList = await fetchCreationTasks(loadingTaskIds);
+          await sleep(CREATION_TASK_POLL_INTERVAL_MS);
+          let taskList: Awaited<ReturnType<typeof fetchCreationTasks>>;
+          try {
+            taskList = await fetchCreationTasks(loadingTaskIds);
+            consecutivePollFailures = 0;
+          } catch (error) {
+            consecutivePollFailures += 1;
+            if (consecutivePollFailures >= CREATION_TASK_POLL_RETRY_LIMIT) {
+              throw new Error(formatCreationTaskError(error, activeTurn.mode === "chat" ? "同步对话状态失败" : "同步生成状态失败"));
+            }
+            updateTurnProgress(conversationId, activeTurn.id, {
+              message: activeTurn.mode === "chat" ? "正在恢复对话状态" : "正在恢复生成状态",
+              detail: `状态同步失败，正在第 ${consecutivePollFailures} 次重试`,
+            });
+            await sleep(Math.min(10000, 1000 * consecutivePollFailures));
+            continue;
+          }
           if (taskList.items.length > 0) {
             await applyTasks(taskList.items);
+            const queuedCount = taskList.items.filter((item) => item.status === "queued").length;
+            const runningCount = taskList.items.filter((item) => item.status === "running").length;
+            const successCount = taskList.items.filter((item) => item.status === "success").length;
+            updateTurnProgress(conversationId, activeTurn.id, {
+              message: activeTurn.mode === "chat" ? "等待对话回复" : "等待生成结果",
+              detail:
+                activeTurn.mode === "chat"
+                  ? runningCount > 0
+                    ? "上游正在生成回复"
+                    : queuedCount > 0
+                      ? "请求已入队，等待上游处理"
+                      : "正在同步回复结果"
+                  : runningCount > 0
+                    ? `上游生成中：${runningCount} 张，已完成 ${successCount} 张`
+                    : queuedCount > 0
+                      ? `排队中：${queuedCount} 张，等待可用账号/并发槽位`
+                      : `正在同步结果，剩余 ${loadingTaskIds.length} 张`,
+            });
           }
           if (taskList.missing_ids.length > 0 && latestTurn) {
             updateTurnProgress(conversationId, activeTurn.id, {
@@ -1931,9 +2260,23 @@ function ImagePageContent() {
               const count = latestTurn.images.filter((image) => image.status === "loading" && image.taskId === taskId).length;
               return count > 0 ? [{ taskId, count }] : [];
             });
-            const resubmitted = await Promise.all(missingTaskGroups.map(submitTaskGroup));
+            const settled = await Promise.allSettled(missingTaskGroups.map(submitTaskGroup));
+            const resubmitted = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
             if (resubmitted.length > 0) {
               await applyTasks(resubmitted);
+            }
+            if (resubmitted.length === 0 && settled.some((result) => result.status === "rejected")) {
+              consecutivePollFailures += 1;
+              if (consecutivePollFailures >= CREATION_TASK_POLL_RETRY_LIMIT) {
+                const failed = settled.find((result) => result.status === "rejected");
+                throw new Error(
+                  formatCreationTaskError(
+                    failed?.status === "rejected" ? failed.reason : undefined,
+                    activeTurn.mode === "chat" ? "恢复对话任务失败" : "恢复生成任务失败",
+                  ),
+                );
+              }
+              await sleep(Math.min(10000, 1000 * consecutivePollFailures));
             }
           }
         }
@@ -1971,6 +2314,7 @@ function ImagePageContent() {
         clearTurnProgress(conversationId, activeTurn.id);
         cancelledTurnIdsRef.current.delete(activeTurnKey);
         activeConversationQueueIds.delete(conversationId);
+        foregroundPollingCountRef.current = Math.max(0, foregroundPollingCountRef.current - 1);
         for (const conversation of conversationsRef.current) {
           if (
             !activeConversationQueueIds.has(conversation.id) &&
@@ -2268,7 +2612,7 @@ function ImagePageContent() {
 
       const imageCount = draft.mode === "chat" ? 1 : normalizeRequestedImageCount(draft.count);
       const mode = draft.mode === "chat" ? "chat" : getComposerConversationMode("image", draft.referenceImages);
-      const referenceImages = usesReferenceImages(mode) ? draft.referenceImages : [];
+      const referenceImages = mode === "chat" ? draft.referenceImages : usesReferenceImages(mode) ? draft.referenceImages : [];
       if (mode !== "chat" && isInvalidCustomRatioSelection(draft.sizeMode, draft.aspectRatio, draft.customRatio)) {
         toast.error("请输入有效的自定义比例，例如 5:4 或 2.39:1");
         return;
@@ -2413,7 +2757,7 @@ function ImagePageContent() {
         prompt,
         model: effectiveModel,
         mode: effectiveImageMode,
-        referenceImages: usesReferenceImages(effectiveImageMode) ? referenceImages : [],
+        referenceImages: effectiveImageMode === "chat" ? referenceImages : usesReferenceImages(effectiveImageMode) ? referenceImages : [],
         count: requestedCount,
         size: effectiveImageMode === "chat" ? "" : imageSize,
         sizeSelection: effectiveImageMode === "chat" ? undefined : currentImageSizeSelection,
@@ -2479,22 +2823,27 @@ function ImagePageContent() {
 
   return (
     <>
-      <section className="mx-auto grid h-[calc(100dvh-6.25rem)] min-h-0 w-full max-w-[1380px] grid-cols-1 gap-2 px-0 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] sm:h-[calc(100dvh-5rem)] sm:gap-3 sm:px-3 sm:pb-6 lg:grid-cols-[240px_minmax(0,1fr)]">
-        <div className="hidden h-full min-h-0 border-r border-[#f2f3f5] pr-3 lg:block">
-          <ImageSidebar
-            conversations={conversations}
-            isLoadingHistory={isLoadingHistory}
-            selectedConversationId={selectedConversationId}
-            onCreateDraft={handleCreateDraft}
-            onClearHistory={openClearHistoryConfirm}
-            onSelectConversation={setSelectedConversationId}
-            onDeleteConversation={openDeleteConversationConfirm}
-            formatConversationTime={formatConversationTime}
-          />
-        </div>
+      <section className="relative isolate mx-auto grid h-[calc(100dvh-5.65rem)] min-h-0 w-full max-w-[1500px] grid-cols-1 gap-2 overflow-hidden rounded-[26px] border border-white/80 bg-[radial-gradient(circle_at_34%_0%,rgba(59,91,255,0.12),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.86)_0%,rgba(246,249,255,0.68)_50%,rgba(241,246,252,0.92)_100%)] px-0 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] shadow-[0_20px_80px_-56px_rgba(15,23,42,0.52)] dark:border-[#b58a3a]/35 dark:bg-[radial-gradient(circle_at_30%_0%,rgba(255,204,112,0.18),transparent_34%),radial-gradient(circle_at_86%_18%,rgba(190,135,44,0.16),transparent_28%),linear-gradient(180deg,#090806_0%,#14100a_48%,#070604_100%)] dark:shadow-[0_24px_110px_-56px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,221,145,0.16)] sm:h-[calc(100dvh-4.7rem)] sm:gap-2.5 sm:px-2 sm:py-2 sm:pb-4 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <div className="pointer-events-none absolute inset-x-0 top-0 -z-10 h-44 bg-[linear-gradient(116deg,rgba(255,255,255,0.72),rgba(219,234,254,0.2),rgba(255,255,255,0))] dark:bg-[linear-gradient(116deg,rgba(255,224,166,0.20),rgba(181,138,58,0.08),rgba(255,255,255,0))]" />
+        {canRenderDesktopSidebar ? (
+          <div className="hidden h-full min-h-0 rounded-[22px] border border-white/70 bg-white/[0.52] px-2 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] backdrop-blur-xl dark:border-[#d6aa56]/24 dark:bg-[#0e0d0a]/82 dark:shadow-[inset_0_1px_0_rgba(255,226,166,0.12),0_24px_70px_-46px_rgba(0,0,0,0.95)] lg:block">
+            <Suspense fallback={<ImageSidebarFallback />}>
+              <ImageSidebar
+                conversations={conversations}
+                isLoadingHistory={isLoadingHistory}
+                selectedConversationId={selectedConversationId}
+                onCreateDraft={handleCreateDraft}
+                onClearHistory={openClearHistoryConfirm}
+                onSelectConversation={setSelectedConversationId}
+                onDeleteConversation={openDeleteConversationConfirm}
+                formatConversationTime={formatConversationTime}
+              />
+            </Suspense>
+          </div>
+        ) : null}
 
         <Dialog open={isHistoryOpen} onOpenChange={setIsHistoryOpen}>
-          <DialogContent className="flex h-[min(82dvh,760px)] w-[92vw] max-w-[460px] flex-col overflow-hidden rounded-[32px] border-white/80 bg-white p-0 shadow-[0_32px_110px_-38px_rgba(15,23,42,0.45)] sm:rounded-[36px]">
+          <DialogContent className="flex h-[min(82dvh,760px)] w-[92vw] max-w-[460px] flex-col overflow-hidden rounded-[32px] border-white/80 bg-white p-0 shadow-[0_32px_110px_-38px_rgba(15,23,42,0.45)] dark:border-[#d6aa56]/28 dark:bg-[#0e0d0a] sm:rounded-[36px]">
             <DialogHeader className="px-6 pt-7 pb-4 sm:px-8">
               <DialogTitle className="flex items-center gap-2 text-xl font-bold tracking-tight">
                 <History className="size-5" />
@@ -2502,403 +2851,51 @@ function ImagePageContent() {
               </DialogTitle>
             </DialogHeader>
             <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-8 sm:px-8">
-              <ImageSidebar
-                conversations={conversations}
-                isLoadingHistory={isLoadingHistory}
-                selectedConversationId={selectedConversationId}
-                onCreateDraft={() => {
-                  handleCreateDraft();
-                  setIsHistoryOpen(false);
-                }}
-                onClearHistory={openClearHistoryConfirm}
-                onSelectConversation={(id) => {
-                  setSelectedConversationId(id);
-                  setIsHistoryOpen(false);
-                }}
-                onDeleteConversation={openDeleteConversationConfirm}
-                formatConversationTime={formatConversationTime}
-                hideActionButtons
-              />
+              <Suspense fallback={<ImageSidebarFallback compact />}>
+                <ImageSidebar
+                  conversations={conversations}
+                  isLoadingHistory={isLoadingHistory}
+                  selectedConversationId={selectedConversationId}
+                  onCreateDraft={() => {
+                    handleCreateDraft();
+                    setIsHistoryOpen(false);
+                  }}
+                  onClearHistory={openClearHistoryConfirm}
+                  onSelectConversation={(id) => {
+                    setSelectedConversationId(id);
+                    setIsHistoryOpen(false);
+                  }}
+                  onDeleteConversation={openDeleteConversationConfirm}
+                  formatConversationTime={formatConversationTime}
+                  hideActionButtons
+                  initialVisibleCount={20}
+                  loadMoreCount={20}
+                />
+              </Suspense>
             </div>
           </DialogContent>
         </Dialog>
 
         {editingTurnDraft ? (
-          <Dialog open onOpenChange={(open) => (!open ? setEditingTurnDraft(null) : null)}>
-            <DialogContent className="flex max-h-[88dvh] w-[min(92vw,640px)] flex-col overflow-hidden rounded-[28px] p-0">
-              <DialogHeader className="px-6 pt-6 pb-2">
-                <DialogTitle>{editingTurnDraft.mode === "chat" ? "编辑对话" : "编辑生成设置"}</DialogTitle>
-                <DialogDescription>
-                  {editingTurnDraft.mode === "chat" ? "修改本轮消息和对话模型。" : "修改本轮提示词、参考图和生成参数。"}
-                </DialogDescription>
-              </DialogHeader>
-              <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">
-                <div className="flex flex-col gap-5">
-                  <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
-                    提示词
-                    <Textarea
-                      value={editingTurnDraft.prompt}
-                      onChange={(event) =>
-                        setEditingTurnDraft((current) =>
-                          current ? { ...current, prompt: event.target.value } : current,
-                        )
-                      }
-                      className="min-h-[128px] resize-y rounded-2xl border-stone-200 bg-white text-sm leading-6 shadow-none"
-                    />
-                  </label>
-
-                  {editingTurnDraft.mode !== "chat" ? (
-                  <div className="flex flex-col gap-3">
-                    <input
-                      ref={editFileInputRef}
-                      type="file"
-                      accept="image/*"
-                      multiple
-                      className="hidden"
-                      onChange={(event) => {
-                        void handleEditReferenceImageChange(Array.from(event.target.files || []));
-                      }}
-                    />
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-sm font-medium text-stone-700">参考图</div>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="rounded-full border-stone-200 bg-white"
-                        onClick={() => editFileInputRef.current?.click()}
-                      >
-                        <ImagePlus className="size-4" />
-                        上传图片
-                      </Button>
-                    </div>
-                    {editingTurnDraft.referenceImages.length > 0 ? (
-                      <div className="flex flex-wrap gap-2">
-                        {editingTurnDraft.referenceImages.map((image, index) => (
-                          <div key={`${image.name}-${index}`} className="relative size-20 shrink-0">
-                            <button
-                              type="button"
-                              className="size-20 overflow-hidden rounded-2xl border border-stone-200 bg-stone-100"
-                              onClick={() =>
-                                openLightbox(
-                                  editingTurnDraft.referenceImages.map((item, itemIndex) => ({
-                                    id: `${item.name}-${itemIndex}`,
-                                    src: item.dataUrl,
-                                  })),
-                                  index,
-                                )
-                              }
-                              aria-label={`预览参考图 ${image.name || index + 1}`}
-                            >
-                              <img
-                                src={image.dataUrl}
-                                alt={image.name || `参考图 ${index + 1}`}
-                                className="h-full w-full object-cover"
-                              />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveEditReferenceImage(index)}
-                              className="absolute -top-1 -right-1 z-10 inline-flex size-6 items-center justify-center rounded-full border border-stone-200 bg-white text-stone-500 shadow-sm transition hover:text-stone-900"
-                              aria-label={`移除参考图 ${image.name || index + 1}`}
-                            >
-                              <X className="size-3.5" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                  ) : null}
-
-                  <div className={cn("grid grid-cols-1 gap-3", editingTurnDraft.mode === "chat" ? "sm:grid-cols-1" : "sm:grid-cols-2 lg:grid-cols-4")}>
-                    {editingTurnDraft.mode !== "chat" ? (
-                    <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
-                      张数
-                      <Input
-                        type="number"
-                        inputMode="numeric"
-                        min="1"
-                        max="10"
-                        step="1"
-                        value={editingTurnDraft.count}
-                        onChange={(event) =>
-                          setEditingTurnDraft((current) =>
-                            current ? { ...current, count: event.target.value } : current,
-                          )
-                        }
-                      />
-                    </label>
-                    ) : null}
-                    <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
-                      模型
-                      <Select
-                        value={editingTurnDraft.model}
-                        onValueChange={(value) =>
-                          setEditingTurnDraft((current) =>
-                            current && isImageModel(value) ? { ...current, model: value } : current,
-                          )
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectGroup>
-                            {(editingTurnDraft.mode === "chat" ? CHAT_MODEL_OPTIONS : IMAGE_CREATION_MODEL_OPTIONS).map((option) => (
-                              <SelectItem key={option.value} value={option.value}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                    </label>
-                    {editingTurnDraft.mode !== "chat" ? (
-                    <>
-                    <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
-                      尺寸
-                      <Select
-                        value={editingTurnDraft.sizeMode}
-                        onValueChange={(value) =>
-                          setEditingTurnDraft((current) =>
-                            current && isImageSizeMode(value) ? { ...current, sizeMode: value } : current,
-                          )
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectGroup>
-                            {IMAGE_SIZE_MODE_OPTIONS.map((option) => (
-                              <SelectItem key={option.value} value={option.value}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                    </label>
-                    {editingTurnDraft.sizeMode === "custom" ? (
-                    <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-end gap-2 lg:col-span-2">
-                      <label className="flex min-w-0 flex-col gap-2 text-sm font-medium text-stone-700">
-                        宽度
-                        <Input
-                          type="number"
-                          inputMode="numeric"
-                          min="1"
-                          step="1"
-                          value={editingTurnDraft.customWidth}
-                          onChange={(event) =>
-                            setEditingTurnDraft((current) =>
-                              current ? { ...current, customWidth: event.target.value } : current,
-                            )
-                          }
-                        />
-                      </label>
-                      <span className="pb-2 text-sm font-medium text-stone-400">x</span>
-                      <label className="flex min-w-0 flex-col gap-2 text-sm font-medium text-stone-700">
-                        高度
-                        <Input
-                          type="number"
-                          inputMode="numeric"
-                          min="1"
-                          step="1"
-                          value={editingTurnDraft.customHeight}
-                          onChange={(event) =>
-                            setEditingTurnDraft((current) =>
-                              current ? { ...current, customHeight: event.target.value } : current,
-                            )
-                          }
-                        />
-                      </label>
-                    </div>
-                    ) : null}
-                    {editingTurnDraft.sizeMode === "ratio" ? (
-                    <>
-                    <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
-                      比例
-                      <Select
-                        value={editingTurnDraft.aspectRatio || EMPTY_IMAGE_ASPECT_RATIO_SELECT_VALUE}
-                        onValueChange={(value) =>
-                          setEditingTurnDraft((current) =>
-                            current
-                              ? {
-                                  ...current,
-                                  aspectRatio:
-                                    value === EMPTY_IMAGE_ASPECT_RATIO_SELECT_VALUE
-                                      ? ""
-                                      : isImageAspectRatio(value)
-                                        ? value
-                                        : current.aspectRatio,
-                                }
-                              : current,
-                          )
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectGroup>
-                            {IMAGE_ASPECT_RATIO_OPTIONS.map((option) => (
-                              <SelectItem
-                                key={option.label}
-                                value={option.value || EMPTY_IMAGE_ASPECT_RATIO_SELECT_VALUE}
-                              >
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                    </label>
-                    <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
-                      分辨率
-                      <Select
-                        value={editingTurnDraft.resolution}
-                        onValueChange={(value) =>
-                          setEditingTurnDraft((current) =>
-                            current && isImageResolution(value) ? { ...current, resolution: value } : current,
-                          )
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectGroup>
-                            {IMAGE_RESOLUTION_OPTIONS.map((option) => (
-                              <SelectItem key={option.value} value={option.value}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                    </label>
-                    {editingTurnDraft.aspectRatio === CUSTOM_IMAGE_ASPECT_RATIO ? (
-                    <label className="flex flex-col gap-2 text-sm font-medium text-stone-700 sm:col-span-2">
-                      自定义比例
-                      <Input
-                        value={editingTurnDraft.customRatio}
-                        onChange={(event) =>
-                          setEditingTurnDraft((current) =>
-                            current ? { ...current, customRatio: event.target.value } : current,
-                          )
-                        }
-                        placeholder="例如 5:4 / 2.39:1"
-                        aria-invalid={editingDraftCustomRatioInvalid}
-                        className={cn(editingDraftCustomRatioInvalid && "border-red-300 focus-visible:ring-red-500/20")}
-                      />
-                    </label>
-                    ) : null}
-                    <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
-                      格式
-                      <Select
-                        value={editingTurnDraft.outputFormat}
-                        onValueChange={(value) =>
-                          setEditingTurnDraft((current) =>
-                            current && isImageOutputFormat(value)
-                              ? { ...current, outputFormat: value, outputCompression: value === "png" ? "" : current.outputCompression }
-                              : current,
-                          )
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectGroup>
-                            {IMAGE_OUTPUT_FORMAT_OPTIONS.map((option) => (
-                              <SelectItem key={option.value} value={option.value}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                    </label>
-                    <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
-                      压缩率
-                      <Input
-                        type="number"
-                        inputMode="numeric"
-                        min="0"
-                        max="100"
-                        step="1"
-                        value={editingTurnDraft.outputCompression}
-                        disabled={editingTurnDraft.outputFormat === "png"}
-                        onChange={(event) =>
-                          setEditingTurnDraft((current) =>
-                            current ? { ...current, outputCompression: event.target.value } : current,
-                          )
-                        }
-                        placeholder={editingTurnDraft.outputFormat === "png" ? "PNG 不适用" : "0-100"}
-                      />
-                    </label>
-                    </>
-                    ) : null}
-                    {editingTurnDraft.sizeMode !== "auto" ? (
-                    <div className="rounded-2xl border border-stone-200 bg-stone-50 px-3 py-2 text-sm sm:col-span-2 lg:col-span-4">
-                      <div className="flex min-w-0 items-center justify-between gap-3">
-                        <span className="shrink-0 font-medium text-stone-600">计算后分辨率</span>
-                        <span className="min-w-0 truncate text-right font-mono font-semibold text-stone-900">
-                          {editingDraftSizePreviewLabel}
-                        </span>
-                      </div>
-                      <div className="mt-1 truncate text-xs text-stone-500">{editingDraftSizePreviewDetail}</div>
-                    </div>
-                    ) : null}
-                    {supportsImageQuality(editingTurnDraft.model) ? (
-                    <label className="flex flex-col gap-2 text-sm font-medium text-stone-700">
-                      质量
-                      <Select
-                        value={editingTurnDraft.quality}
-                        onValueChange={(value) =>
-                          setEditingTurnDraft((current) =>
-                            current && isImageQuality(value) ? { ...current, quality: value } : current,
-                          )
-                        }
-                      >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectGroup>
-                            {IMAGE_QUALITY_OPTIONS.map((option) => (
-                              <SelectItem key={option.value} value={option.value}>
-                                {option.label}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                    </label>
-                    ) : null}
-                    </>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-              <DialogFooter className="border-t border-stone-100 px-6 py-4">
-                <Button variant="outline" onClick={() => setEditingTurnDraft(null)}>
-                  取消
-                </Button>
-                <Button variant="outline" onClick={() => void handleSaveEditingTurn(false)}>
-                  保存
-                </Button>
-                <Button onClick={() => void handleSaveEditingTurn(true)}>
-                  {editingTurnDraft.mode === "chat" ? "保存并重新发送" : "保存并重新生成"}
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+          <Suspense fallback={<LazyDialogFallback label="正在打开编辑面板..." />}>
+            <ImageTurnEditDialog
+              draft={editingTurnDraft}
+              customRatioInvalid={editingDraftCustomRatioInvalid}
+              sizePreviewLabel={editingDraftSizePreviewLabel}
+              sizePreviewDetail={editingDraftSizePreviewDetail}
+              fileInputRef={editFileInputRef}
+              onDraftChange={setEditingTurnDraft}
+              onReferenceImageChange={handleEditReferenceImageChange}
+              onRemoveReferenceImage={handleRemoveEditReferenceImage}
+              onOpenLightbox={openLightbox}
+              onSave={handleSaveEditingTurn}
+              onClose={() => setEditingTurnDraft(null)}
+            />
+          </Suspense>
         ) : null}
 
-        <div className="relative flex min-h-0 flex-col gap-2 sm:gap-4">
-          <div className="flex items-center justify-between gap-2 px-1 sm:px-4">
+        <div className="relative flex min-h-0 flex-col gap-1.5 sm:gap-2">
+          <div className="flex items-center justify-between gap-2 px-1 sm:px-2">
             <div className="flex min-w-0 flex-1 items-center gap-2 lg:hidden">
               <Button
                 variant="outline"
@@ -2928,37 +2925,47 @@ function ImagePageContent() {
 
           <div
             ref={resultsViewportRef}
-            className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-1 pt-2 pb-[14rem] sm:px-4 sm:pt-4 sm:pb-[15rem]"
-            style={composerDockHeight > 0 ? { paddingBottom: composerDockHeight + 24 } : undefined}
+            className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-1 pt-1.5 pb-[10.5rem] sm:px-3 sm:pt-2.5 sm:pb-[14rem]"
+            style={composerDockHeight > 0 ? { paddingBottom: composerDockHeight + 18 } : undefined}
           >
-            <ImageResults
-              selectedConversation={selectedConversation}
-              progressByTurnKey={progressByTurnKey}
-              progressNow={progressNow}
-              promptPresets={IMAGE_PROMPT_PRESETS}
-              onOpenLightbox={openLightbox}
-              onApplyPromptPreset={handleApplyPromptPreset}
-              onContinueEdit={handleContinueEdit}
-              onEditTurn={openEditTurnDialog}
-              onCancelTurn={handleCancelTurn}
-              onRegenerateTurn={handleRegenerateTurn}
-              onRetryImage={handleRetryImage}
-              onImageVisibilityChange={handleImageVisibilityChange}
-              visibilityMutatingImageKey={visibilityMutatingImageKey}
-              formatConversationTime={formatConversationTime}
-            />
+            <Suspense
+              fallback={
+                <div className="flex min-h-[180px] items-center justify-center rounded-[24px] border border-white/70 bg-white/55 text-sm font-semibold text-[#45515e] backdrop-blur-xl dark:border-[#d6aa56]/20 dark:bg-[#0e0d0a]/70 dark:text-[#d6aa56]">
+                  正在打开创作结果区...
+                </div>
+              }
+            >
+              <ImageResults
+                selectedConversation={selectedConversation}
+                progressByTurnKey={progressByTurnKey}
+                progressNow={progressNow}
+                promptPresets={publicPromptPresets}
+                isLoadingPromptPresets={isLoadingPublicPromptPresets}
+                promptPresetStatus={publicPromptPresetStatus}
+                onOpenLightbox={openLightbox}
+                onApplyPromptPreset={handleApplyPromptPreset}
+                onContinueEdit={handleContinueEdit}
+                onEditTurn={openEditTurnDialog}
+                onCancelTurn={handleCancelTurn}
+                onRegenerateTurn={handleRegenerateTurn}
+                onRetryImage={handleRetryImage}
+                onImageVisibilityChange={handleImageVisibilityChange}
+                visibilityMutatingImageKey={visibilityMutatingImageKey}
+                formatConversationTime={formatConversationTime}
+              />
+            </Suspense>
           </div>
 
           <div
             ref={composerDockRef}
-            className="pointer-events-none absolute inset-x-0 bottom-0 z-30 px-1 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] sm:px-4 sm:pb-2"
+            className="pointer-events-none absolute inset-x-0 bottom-0 z-30 px-1 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] sm:px-3 sm:pb-2"
             style={
               {
                 "--image-composer-dock-height": `${composerDockHeight}px`,
               } as CSSProperties
             }
           >
-            <div className="pointer-events-auto mx-auto w-full max-w-[900px]">
+            <div className="pointer-events-auto mx-auto w-full max-w-[960px]">
               <ImageComposer
                 composerMode={composerMode}
                 prompt={imagePrompt}
@@ -3002,19 +3009,28 @@ function ImagePageContent() {
         </div>
       </section>
 
-      <ImagePromptMarket
-        open={isPromptMarketOpen}
-        onOpenChange={setIsPromptMarketOpen}
-        onApplyPrompt={handleApplyMarketPrompt}
-      />
+      {isPromptMarketOpen ? (
+        <Suspense fallback={<LazyDialogFallback label="正在打开提示词市场..." />}>
+          <ImagePromptMarket
+            open={isPromptMarketOpen}
+            onOpenChange={setIsPromptMarketOpen}
+            onApplyPrompt={handleApplyMarketPrompt}
+            isAdmin={isAdmin}
+          />
+        </Suspense>
+      ) : null}
 
-      <ImageLightbox
-        images={lightboxImages}
-        currentIndex={lightboxIndex}
-        open={lightboxOpen}
-        onOpenChange={setLightboxOpen}
-        onIndexChange={setLightboxIndex}
-      />
+      {lightboxOpen ? (
+        <Suspense fallback={<LazyDialogFallback label="正在打开图片预览..." />}>
+          <ImageLightbox
+            images={lightboxImages}
+            currentIndex={lightboxIndex}
+            open={lightboxOpen}
+            onOpenChange={setLightboxOpen}
+            onIndexChange={setLightboxIndex}
+          />
+        </Suspense>
+      ) : null}
 
       {deleteConfirm ? (
         <Dialog open onOpenChange={(open) => (!open ? setDeleteConfirm(null) : null)}>
@@ -3051,5 +3067,5 @@ export default function ImagePage() {
     );
   }
 
-  return <ImagePageContent />;
+  return <ImagePageContent isAdmin={session.role === "admin"} />;
 }

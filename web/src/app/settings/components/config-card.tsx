@@ -132,6 +132,24 @@ export function ConfigCard() {
   const setRegistrationEnabled = useSettingsStore(
     (state) => state.setRegistrationEnabled,
   );
+  const setUserFreeQuota = useSettingsStore(
+    (state) => state.setUserFreeQuota,
+  );
+  const setInviteRewardQuota = useSettingsStore(
+    (state) => state.setInviteRewardQuota,
+  );
+  const setInviteeBonusQuota = useSettingsStore(
+    (state) => state.setInviteeBonusQuota,
+  );
+  const setTurnstileEnabled = useSettingsStore(
+    (state) => state.setTurnstileEnabled,
+  );
+  const setTurnstileSiteKey = useSettingsStore(
+    (state) => state.setTurnstileSiteKey,
+  );
+  const setTurnstileSecretKey = useSettingsStore(
+    (state) => state.setTurnstileSecretKey,
+  );
   const saveConfig = useSettingsStore((state) => state.saveConfig);
 
   const handleTestProxy = async () => {
@@ -342,7 +360,7 @@ export function ConfigCard() {
                 setProxy(event.target.value);
                 setProxyTestResult(null);
               }}
-              placeholder="http://127.0.0.1:7890"
+              placeholder="留空则不使用代理，仅手动填写后生效"
               className={settingsInputClassName}
             />
             {proxyTestResult ? (
@@ -365,7 +383,7 @@ export function ConfigCard() {
         <section className={configSectionClassName}>
           <SectionHeading
             title="账号入口"
-            tip="开启后登录页会显示账号注册入口，新账号默认绑定普通用户角色。"
+            tip="开启后登录页会显示账号注册入口；注册赠送发给新账号，邀请人奖励发给分享者，被邀请人奖励发给通过邀请码注册的新用户。"
           />
           <div className="grid gap-2 sm:grid-cols-2">
             <ConfigOption
@@ -373,6 +391,91 @@ export function ConfigCard() {
               onCheckedChange={setRegistrationEnabled}
               label="开放账号注册"
             />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-user-free-quota">
+                注册赠送点数
+              </ConfigFieldLabel>
+              <Input
+                id="settings-user-free-quota"
+                type="number"
+                min={0}
+                inputMode="numeric"
+                value={String(config?.user_free_quota ?? "")}
+                onChange={(event) => setUserFreeQuota(event.target.value)}
+                placeholder="10"
+                className={settingsInputClassName}
+              />
+            </Field>
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-invite-reward-quota">
+                邀请人奖励
+              </ConfigFieldLabel>
+              <Input
+                id="settings-invite-reward-quota"
+                type="number"
+                min={0}
+                inputMode="numeric"
+                value={String(config?.invite_reward_quota ?? "")}
+                onChange={(event) => setInviteRewardQuota(event.target.value)}
+                placeholder="0"
+                className={settingsInputClassName}
+              />
+            </Field>
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-invitee-bonus-quota">
+                被邀请人奖励
+              </ConfigFieldLabel>
+              <Input
+                id="settings-invitee-bonus-quota"
+                type="number"
+                min={0}
+                inputMode="numeric"
+                value={String(config?.invitee_bonus_quota ?? "")}
+                onChange={(event) => setInviteeBonusQuota(event.target.value)}
+                placeholder="0"
+                className={settingsInputClassName}
+              />
+            </Field>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <ConfigOption
+              checked={Boolean(config?.turnstile_enabled)}
+              onCheckedChange={setTurnstileEnabled}
+              label="登录/注册启用 Cloudflare 验证"
+            />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-turnstile-site-key">
+                Turnstile Site Key
+              </ConfigFieldLabel>
+              <Input
+                id="settings-turnstile-site-key"
+                value={String(config?.turnstile_site_key ?? "")}
+                onChange={(event) => setTurnstileSiteKey(event.target.value)}
+                placeholder="0x4AAAA..."
+                className={settingsInputClassName}
+              />
+            </Field>
+            <Field className={configFieldClassName}>
+              <ConfigFieldLabel htmlFor="settings-turnstile-secret-key">
+                Turnstile Secret Key
+              </ConfigFieldLabel>
+              <Input
+                id="settings-turnstile-secret-key"
+                type="password"
+                value={String(config?.turnstile_secret_key ?? "")}
+                onChange={(event) => setTurnstileSecretKey(event.target.value)}
+                placeholder={
+                  config?.turnstile_secret_configured
+                    ? "已配置，留空保持不变"
+                    : "请输入 Secret Key"
+                }
+                className={settingsInputClassName}
+              />
+            </Field>
           </div>
         </section>
 

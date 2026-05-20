@@ -15,7 +15,7 @@ export const AUTH_SESSION_CHANGE_EVENT = "chatgpt2api:auth-session-change";
 
 export function authSessionFromLoginResponse(data: LoginResponse, key: string): StoredAuthSession {
   return {
-    key,
+    key: data.token || key,
     role: data.role,
     roleId: data.role_id,
     roleName: data.role_name,
@@ -25,6 +25,9 @@ export function authSessionFromLoginResponse(data: LoginResponse, key: string): 
     menuPaths: data.menu_paths || [],
     apiPermissions: data.api_permissions || [],
     menus: data.menus || [],
+    imageQuotaTotal: data.image_quota_total ?? null,
+    imageQuotaUsed: Math.max(0, Number(data.image_quota_used ?? 0) || 0),
+    imageQuotaRemaining: data.image_quota_remaining ?? null,
   };
 }
 

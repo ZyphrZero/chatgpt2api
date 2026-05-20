@@ -965,6 +965,7 @@ function ImageManagerContent({
         onChange={(event) => updateSearchKeyword(event.target.value)}
         placeholder={placeholder}
         className="h-10 rounded-lg pr-9 pl-9"
+        aria-label="搜索图片库"
       />
       {searchKeyword ? (
         <button
@@ -983,7 +984,7 @@ function ImageManagerContent({
   const renderFilterControls = () => (
     <>
       <Select value={visibilityFilter} onValueChange={(value) => updateVisibilityFilter(value as ImageVisibilityFilter)}>
-        <SelectTrigger className="h-10 min-w-0 rounded-lg">
+        <SelectTrigger className="h-10 min-w-0 rounded-lg" aria-label="筛选公开状态">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -995,7 +996,7 @@ function ImageManagerContent({
         </SelectContent>
       </Select>
       <Select value={formatFilter} onValueChange={(value) => updateFormatFilter(value as ImageFormatFilter)}>
-        <SelectTrigger className="h-10 min-w-0 rounded-lg">
+        <SelectTrigger className="h-10 min-w-0 rounded-lg" aria-label="筛选图片格式">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -1010,7 +1011,7 @@ function ImageManagerContent({
         </SelectContent>
       </Select>
       <Select value={orientationFilter} onValueChange={(value) => updateOrientationFilter(value as ImageOrientationFilter)}>
-        <SelectTrigger className="h-10 min-w-0 rounded-lg">
+        <SelectTrigger className="h-10 min-w-0 rounded-lg" aria-label="筛选图片方向">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -1024,7 +1025,7 @@ function ImageManagerContent({
         </SelectContent>
       </Select>
       <Select value={resolutionFilter} onValueChange={(value) => updateResolutionFilter(value as ImageResolutionFilter)}>
-        <SelectTrigger className="h-10 min-w-0 rounded-lg">
+        <SelectTrigger className="h-10 min-w-0 rounded-lg" aria-label="筛选图片分辨率">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -1038,7 +1039,7 @@ function ImageManagerContent({
         </SelectContent>
       </Select>
       <Select value={aspectRatioFilter} onValueChange={(value) => updateAspectRatioFilter(value as ImageAspectRatioFilter)}>
-        <SelectTrigger className="h-10 min-w-0 rounded-lg">
+        <SelectTrigger className="h-10 min-w-0 rounded-lg" aria-label="筛选图片比例">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -1437,6 +1438,7 @@ function ImageManagerContent({
                 const sizeLabel = formatImageFileSize(item.size);
                 const imageMeta = [dimensions, ratioLabel, megapixelsLabel, sizeLabel].filter(Boolean).join(" | ");
                 const ownerLabel = imageOwnerLabel(item);
+                const promptText = (item.prompt || item.revised_prompt || "").trim();
                 const canUpdateVisibility = galleryView === "mine";
                 const showVisibilityStatus = canUpdateVisibility || (isAdmin && galleryView === "public");
                 return (
@@ -1515,11 +1517,11 @@ function ImageManagerContent({
                           setLightboxOpen(true);
                         }}
                         className="inline-flex h-7 items-center gap-1 rounded-full bg-white/95 px-2 text-[11px] font-medium text-stone-800 shadow-sm transition hover:bg-white hover:text-stone-950"
-                        aria-label="View Original"
-                        title="View Original"
+                        aria-label="查看原图"
+                        title="查看原图"
                       >
                         <Eye className="size-3" />
-                        View Original
+                        原图
                       </button>
                       {galleryView !== "mine" ? (
                         <button
@@ -1605,6 +1607,22 @@ function ImageManagerContent({
                         <div className="mt-0.5 truncate text-[11px] text-white/90">{item.created_at}</div>
                         {imageMeta ? (
                           <div className="mt-0.5 truncate text-[11px] text-white/90">{imageMeta}</div>
+                        ) : null}
+                        {isAdmin && galleryView === "public" && promptText ? (
+                          <div
+                            tabIndex={0}
+                            role="region"
+                            aria-label="完整提示词"
+                            onPointerDown={(event) => event.stopPropagation()}
+                            onClick={(event) => event.stopPropagation()}
+                            onWheel={(event) => event.stopPropagation()}
+                            className="pointer-events-auto mt-1.5 max-h-[8.5rem] overflow-y-auto overscroll-contain rounded-xl bg-black/32 px-2 py-1.5 text-[11px] leading-4 whitespace-pre-wrap break-words text-white/95 ring-1 ring-white/15 outline-none [scrollbar-gutter:stable] selection:bg-white/25 selection:text-white focus-visible:ring-2 focus-visible:ring-white/55 sm:max-h-[10.5rem]"
+                          >
+                            <span className="mb-1 block text-[10px] font-bold tracking-wide text-white/70">
+                              完整提示词 · 可滚动查看
+                            </span>
+                            <span>{promptText}</span>
+                          </div>
                         ) : null}
                       </div>
                     </div>

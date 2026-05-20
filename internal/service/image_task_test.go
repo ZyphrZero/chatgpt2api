@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,6 +181,7 @@ func TestImageTaskServicePassesMessagesToHandler(t *testing.T) {
 	if got := payload["quality"]; got != "high" {
 		t.Fatalf("payload quality = %#v, want high", got)
 	}
+	waitForTaskTerminalStatus(t, svc, identity, "task-1")
 }
 
 func TestImageTaskServicePassesImageRequestMetadataToHandler(t *testing.T) {
@@ -207,6 +209,7 @@ func TestImageTaskServicePassesImageRequestMetadataToHandler(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for handler payload")
 	}
+	waitForTaskTerminalStatus(t, svc, identity, "task-1")
 }
 
 func TestImageTaskServiceSubmitsChatTasks(t *testing.T) {
@@ -328,6 +331,47 @@ func TestImageTaskServiceLimitsConcurrentImageSlots(t *testing.T) {
 	}
 	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusSuccess)
 	waitForTaskStatus(t, svc, identity, "task-2", TaskStatusSuccess)
+}
+
+func TestImageTaskServiceDoesNotInjectSingleTaskWorkerRacingHint(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	started := make(chan struct {
+		prompt     string
+		maxWorkers int
+	}, 3)
+	release := make(chan struct{})
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		started <- struct {
+			prompt     string
+			maxWorkers int
+		}{prompt: payload["prompt"].(string), maxWorkers: intValue(payload["max_image_workers"])}
+		<-release
+		return map[string]any{"data": []map[string]any{{"url": "https://example.test/image.png"}}}, nil
+	}
+	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 }, func() int { return 4 })
+	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
+
+	for _, id := range []string{"task-1", "task-2", "task-3"} {
+		if _, err := svc.SubmitGeneration(context.Background(), identity, id, id, "gpt-image-2", "", "medium", "https://base.test", 1, nil); err != nil {
+			t.Fatalf("SubmitGeneration(%s) error = %v", id, err)
+		}
+	}
+
+	first := waitForStartedImageTask(t, started)
+	second := waitForStartedImageTask(t, started)
+	third := waitForStartedImageTask(t, started)
+	got := map[string]int{first.prompt: first.maxWorkers, second.prompt: second.maxWorkers, third.prompt: third.maxWorkers}
+	counts := map[int]int{}
+	for _, workers := range got {
+		counts[workers]++
+	}
+	if counts[0] != 3 {
+		t.Fatalf("worker budgets = %#v, want no max_image_workers racing hints", got)
+	}
+	close(release)
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusSuccess)
+	waitForTaskStatus(t, svc, identity, "task-2", TaskStatusSuccess)
+	waitForTaskStatus(t, svc, identity, "task-3", TaskStatusSuccess)
 }
 
 func TestImageTaskServiceLimitsUserDefaultConcurrentImages(t *testing.T) {
@@ -514,9 +558,88 @@ func TestImageTaskServiceMarksTimedOutTaskAsError(t *testing.T) {
 	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusError)
 	got := svc.ListTasks(identity, []string{"task-1"})
 	item := got["items"].([]map[string]any)[0]
-	if item["error"] != "图片生成超时，请稍后重试或降低分辨率" {
+	if item["error"] != "图片生成超过等待上限，请稍后重试或切换账号" {
 		t.Fatalf("timeout error = %#v", item)
 	}
+}
+
+func TestImageTaskServiceExpiresStaleRunningTaskOnList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	svc := NewImageTaskService(path, failingImageTaskHandler, failingImageTaskHandler, failingImageTaskHandler, func() int { return 30 })
+	svc.SetTaskTimeoutGetter(func() time.Duration { return 20 * time.Millisecond })
+	identity := Identity{ID: "admin", Name: "Admin", Role: AuthRoleAdmin}
+	key := taskKey(ownerID(identity), "task-1")
+	staleTime := time.Now().Add(-time.Minute).Format("2006-01-02 15:04:05")
+	cancelled := make(chan struct{})
+	svc.mu.Lock()
+	svc.tasks[key] = map[string]any{
+		"id":         "task-1",
+		"owner_id":   ownerID(identity),
+		"status":     TaskStatusRunning,
+		"mode":       "generate",
+		"model":      "auto",
+		"count":      1,
+		"created_at": staleTime,
+		"updated_at": staleTime,
+	}
+	svc.cancels[key] = func() { close(cancelled) }
+	svc.mu.Unlock()
+
+	got := svc.ListTasks(identity, []string{"task-1"})
+	item := got["items"].([]map[string]any)[0]
+	if item["status"] != TaskStatusError {
+		t.Fatalf("stale running task status = %#v, want error", item)
+	}
+	if item["error"] != "图片生成超过等待上限，请稍后重试或切换账号" {
+		t.Fatalf("stale running task error = %#v", item)
+	}
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("stale running task cancel func was not called")
+	}
+}
+
+func TestImageTaskServiceRestartsStaleQueuedTask(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	handlerCalls := make(chan string, 1)
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		handlerCalls <- fmt.Sprint(payload["prompt"])
+		return map[string]any{"data": []map[string]any{{"url": "https://example.test/restarted.png"}}}, nil
+	}
+	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	identity := Identity{ID: "admin", Name: "Admin", Role: AuthRoleAdmin}
+	staleTime := time.Now().Add(-time.Minute).Format("2006-01-02 15:04:05")
+	key := taskKey(ownerID(identity), "task-1")
+	svc.mu.Lock()
+	svc.tasks[key] = map[string]any{
+		"id":         "task-1",
+		"owner_id":   ownerID(identity),
+		"status":     TaskStatusQueued,
+		"mode":       "generate",
+		"model":      "auto",
+		"count":      1,
+		"created_at": staleTime,
+		"updated_at": staleTime,
+	}
+	svc.mu.Unlock()
+
+	task, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "restart stale", "auto", "", "medium", "https://base.test", 1, nil)
+	if err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
+	}
+	if task["status"] != TaskStatusQueued {
+		t.Fatalf("restarted task initial status = %#v, want queued", task)
+	}
+	select {
+	case got := <-handlerCalls:
+		if got != "restart stale" {
+			t.Fatalf("handler prompt = %q, want restart stale", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for stale queued task restart")
+	}
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusSuccess)
 }
 
 func TestImageTaskServicePreservesTextOutputType(t *testing.T) {
@@ -538,6 +661,29 @@ func TestImageTaskServicePreservesTextOutputType(t *testing.T) {
 	}
 	data := item["data"].([]map[string]any)
 	if len(data) != 1 || data[0]["text_response"] != "text response" {
+		t.Fatalf("text response data = %#v", data)
+	}
+}
+
+func TestImageTaskServiceTreatsTextOutputErrorAsMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image_tasks.json")
+	handler := func(ctx context.Context, identity Identity, payload map[string]any) (map[string]any, error) {
+		return map[string]any{"message": "text-only image task", "output_type": "text"}, fmt.Errorf("image_generation_text_response")
+	}
+	svc := NewImageTaskService(path, handler, handler, handler, func() int { return 30 })
+	identity := Identity{ID: "alice", Name: "Alice", Role: "user"}
+
+	if _, err := svc.SubmitGeneration(context.Background(), identity, "task-1", "who are you", "gpt-image-2", "1024x1024", "high", "https://base.test", 1, nil); err != nil {
+		t.Fatalf("SubmitGeneration() error = %v", err)
+	}
+	waitForTaskStatus(t, svc, identity, "task-1", TaskStatusSuccess)
+	got := svc.ListTasks(identity, []string{"task-1"})
+	item := got["items"].([]map[string]any)[0]
+	if item["output_type"] != "text" || item["error"] != nil && item["error"] != "" {
+		t.Fatalf("task item = %#v, want successful text output", item)
+	}
+	data := item["data"].([]map[string]any)
+	if len(data) != 1 || data[0]["text_response"] != "text-only image task" {
 		t.Fatalf("text response data = %#v", data)
 	}
 }
@@ -583,6 +729,39 @@ func waitForStartedTask(t *testing.T, started <-chan string) string {
 	return ""
 }
 
+func waitForStartedImageTask(t *testing.T, started <-chan struct {
+	prompt     string
+	maxWorkers int
+}) struct {
+	prompt     string
+	maxWorkers int
+} {
+	t.Helper()
+	select {
+	case item := <-started:
+		return item
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for task handler to start")
+	}
+	return struct {
+		prompt     string
+		maxWorkers int
+	}{}
+}
+
+func intValue(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
 func failingImageTaskHandler(context.Context, Identity, map[string]any) (map[string]any, error) {
 	return nil, errors.New("unexpected handler call")
 }
@@ -599,4 +778,22 @@ func waitForTaskStatus(t *testing.T, svc *ImageTaskService, identity Identity, t
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("task %s did not reach status %s", taskID, want)
+}
+
+func waitForTaskTerminalStatus(t *testing.T, svc *ImageTaskService, identity Identity, taskID string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		got := svc.ListTasks(identity, []string{taskID})
+		items := got["items"].([]map[string]any)
+		if len(items) == 1 {
+			status := items[0]["status"]
+			if status == TaskStatusSuccess || status == TaskStatusError || status == TaskStatusCancelled {
+				return items[0]
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("task %s did not reach a terminal status", taskID)
+	return nil
 }

@@ -148,6 +148,27 @@ func TestSelectWorkspaceForConsentCodeUsesCookieFallback(t *testing.T) {
 	}
 }
 
+func TestRegisterOAuthCodeExtractsEncodedAndEmbeddedCallbacks(t *testing.T) {
+	cases := map[string]string{
+		registerPlatformOAuthRedirectURI + "?code=query-code&state=state":                   "query-code",
+		registerPlatformOAuthRedirectURI + "#code=fragment-code&state=state":                "fragment-code",
+		`<a href="https://platform.openai.com/auth/callback?code=html-code&amp;state=s">`:   "html-code",
+		`https%3A%2F%2Fplatform.openai.com%2Fauth%2Fcallback%3Fcode%3Durl-code%26state%3Ds`: "url-code",
+	}
+	for input, want := range cases {
+		if got := registerOAuthCode(input); got != want {
+			t.Fatalf("registerOAuthCode(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestRegisterRefreshLocationExtractsURL(t *testing.T) {
+	header := `0; url="https://platform.openai.com/auth/callback?code=refresh-code&state=s"`
+	if got := registerRefreshLocation(header); got != "https://platform.openai.com/auth/callback?code=refresh-code&state=s" {
+		t.Fatalf("registerRefreshLocation() = %q", got)
+	}
+}
+
 func TestRegisterHTTPClientUsesSOCKSTransport(t *testing.T) {
 	client, err := registerHTTPClient("socks5h://127.0.0.1:1", time.Second, "device-1")
 	if err != nil {

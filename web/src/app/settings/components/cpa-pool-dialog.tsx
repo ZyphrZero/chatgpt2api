@@ -91,6 +91,8 @@ export function CPAPoolDialog() {
                 type="button"
                 className="absolute top-1/2 right-3 -translate-y-1/2 text-muted-foreground transition hover:text-foreground"
                 onClick={() => setShowSecret(!showSecret)}
+                aria-label={showSecret ? "隐藏 CPA 管理密钥" : "显示 CPA 管理密钥"}
+                title={showSecret ? "隐藏密钥" : "显示密钥"}
               >
                 {showSecret ? (
                   <EyeOff className="size-4" />
