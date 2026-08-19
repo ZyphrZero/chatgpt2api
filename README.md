@@ -679,4 +679,4 @@ Telegram 群组：[ChatGPT2API](https://t.me/+YBR7t_CPOYBkYzU1)
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=ZyphrZero/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=ZyphrZero%2Fchatgpt2api&type=date&legend=top-left)
+[![Star History Chart](https://star-history.dera.page/svg?repos=ZyphrZero/chatgpt2api&type=date&legend=top-left)](https://star-history.dera.page/#ZyphrZero/chatgpt2api&type=date&legend=top-left)
